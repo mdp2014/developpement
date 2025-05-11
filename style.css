@@ -1,1 +1,86 @@
+body {
+  margin: 0;
+  font-family: 'Orbitron', sans-serif;
+  background: linear-gradient(45deg, #ff7f50, #ff1493, #1e90ff, #32cd32, #ff6347, #ff4500, #ffff00, #8a2be2);
+  background-size: 400% 400%;
+  animation: gradientAnimation 10s ease infinite;
+  color: #fff;
+  overflow-x: hidden;
+}
 
+@keyframes gradientAnimation {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+header {
+  padding: 2rem;
+  text-align: center;
+  font-size: 3rem;
+  animation: glow 2s infinite alternate;
+  letter-spacing: 2px;
+}
+
+@keyframes glow {
+  0% { text-shadow: 0 0 10px #ff7f50; }
+  100% { text-shadow: 0 0 30px #ff7f50, 0 0 10px #fff; }
+}
+
+nav {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin-bottom: 2rem;
+  animation: fadeIn 2s ease-in-out;
+}
+
+nav a {
+  color: #fff;
+  text-decoration: none;
+  border: 1px solid #fff;
+  padding: 0.5rem 1rem;
+  border-radius: 10px;
+  transition: all 0.3s;
+}
+
+nav a:hover {
+  background: #ff7f50;
+  color: #000;
+  box-shadow: 0 0 10px #ff7f50;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 2rem;
+  padding: 2rem;
+}
+
+.site-card {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid #ff7f50;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  backdrop-filter: blur(5px);
+  transition: transform 0.4s, box-shadow 0.4s;
+  cursor: pointer;
+  position: relative;
+}
+
+.site-card:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 25px #ff7f50;
+}
+
+.site-title {
+  font-size: 1.8rem;
+  margin-bottom: 1rem;
+}
+
+footer {
+  text-align: center;
+  padding: 2rem;
+  font-size: 0.9rem;
+  color: #aaa;
+}
