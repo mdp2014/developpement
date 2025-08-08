@@ -1,0 +1,71 @@
+name: Deploy Supabase Edge Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'supabase/functions/**'
+      - 'supabase/ts/**'
+      - '.github/workflows/deploy-supabase.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🧩 Préparer les dossiers functions/ à partir de ts/
+        run: |
+          set -euo pipefail
+          echo "📁 Contenu initial de supabase/ts :"
+          ls -l supabase/ts || echo "❌ Dossier supabase/ts introuvable"
+
+          if compgen -G "supabase/ts/*.ts" > /dev/null; then
+            echo "✅ Fichiers .ts détectés, début de traitement"
+          else
+            echo "⚠️ Aucun fichier .ts trouvé dans supabase/ts, rien à copier"
+            exit 1
+          fi
+
+          rm -rf supabase/functions/*
+          mkdir -p supabase/functions
+
+          for file in supabase/ts/*.ts; do
+            echo "➡️ Traitement de $file"
+            name=$(basename "$file" .ts)
+            dest="supabase/functions/$name"
+            mkdir -p "$dest"
+            cp "$file" "$dest/index.ts"
+            echo "📄 Copié $file → $dest/index.ts"
+          done
+
+          if [ -f supabase/import_map.json ]; then
+            cp supabase/import_map.json supabase/functions/import_map.json
+            echo "✅ import_map.json copié dans supabase/functions/"
+          else
+            echo "⚠️ import_map.json non trouvé dans supabase/, le déploiement peut échouer"
+            exit 1
+          fi
+
+          echo "📁 Arborescence finale de supabase/functions :"
+          find supabase/functions
+
+      - name: 🛠️ Install Supabase CLI (v2.30.4)
+        run: |
+          curl -L https://github.com/supabase/cli/releases/download/v2.30.4/supabase_2.30.4_linux_amd64.deb -o supabase.deb
+          sudo dpkg -i supabase.deb
+          supabase --version
+
+      - name: 📦 Install Deno (runtime for Supabase functions)
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: 🚀 Deploy all Edge Functions
+        run: |
+          supabase functions deploy --project-ref ${{ secrets.SUPABASE_PROJECT_ID }} --import-map supabase/functions/import_map.json
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
