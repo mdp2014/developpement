@@ -1,5 +1,4 @@
 name: Deploy Supabase Edge Functions
-
 on:
   push:
     branches:
