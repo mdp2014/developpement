@@ -10,7 +10,6 @@ const CSRF_COOKIE_NAME = "csrf-token";
 const AUTH_COOKIE_NAME = "sb-access-token";
 const REQUIRED_MODULE = "application";
 
-
 serve(async (req) => {
   const method = req.method;
   const origin = getOrigin(req);
