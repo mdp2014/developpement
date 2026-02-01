@@ -108,10 +108,12 @@ async function sendMessage(userId, content) {
         } else {
             console.log('Message inserted:', data);
             getMessages();
+            return true;
         }
     } catch (error) {
         console.error('Error sending message:', error);
     }
+    return false;
 }
 
 async function deleteMessage(messageId) {
@@ -226,12 +228,12 @@ function logout() {
 }
 
 // Fonction mutualisée pour envoyer un message
-function handleSend() {
+async function handleSend() {
     if (currentUserId) {
         const content = messageInput.value;
         if (content.trim() !== '') {
-            sendMessage(currentUserId, content);
-            messageInput.value = '';
+            const ok = await sendMessage(currentUserId, content);
+            if (ok) messageInput.value = '';
         }
     } else {
         alert('Veuillez vous connecter pour envoyer un message');
