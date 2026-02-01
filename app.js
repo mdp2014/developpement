@@ -1,22 +1,22 @@
 const supabaseUrl = 'https://unjdpzraozgcswfucezd.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVuamRwenJhb3pnY3N3ZnVjZXpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5NTMzOTQsImV4cCI6MjA4NTUyOTM5NH0.2fAnI9_Z-iay53GZ2UkXWxBnDULPC6Dm0sCK3XXIMwc';
-const chatMessages = document.getElementById('chat-messages');
-const messageInput = document.getElementById('message-input');
-const sendButton = document.getElementById('send-button');
-const userSelect = document.getElementById('user-select');
-const loginUsername = document.getElementById('login-username');
-const loginPassword = document.getElementById('login-password');
-const loginButton = document.getElementById('login-button');
-const loginContainer = document.getElementById('login-container');
-const connectedUser = document.getElementById('connected-user');
+const chatMessages      = document.getElementById('chat-messages');
+const messageInput      = document.getElementById('message-input');
+const sendButton        = document.getElementById('send-button');
+const userSelect        = document.getElementById('user-select');
+const loginUsername     = document.getElementById('login-username');
+const loginPassword     = document.getElementById('login-password');
+const loginButton       = document.getElementById('login-button');
+const loginContainer    = document.getElementById('login-container');
+const connectedUser     = document.getElementById('connected-user');
 const connectedUsername = document.getElementById('connected-username');
-const logoutButton = document.getElementById('logout-button');
+const logoutButton      = document.getElementById('logout-button');
 
 let users = {};
 let currentUserId = null;
-let refreshInterval = null; // référence à l'intervalle pour pouvoir le stopper
+let refreshInterval = null;
 
-// BUG FIX #2 : on ne récupère plus "password" — la vérification se fait côté serveur
+// BUG FIX #2 : on ne récupère plus "password"
 async function getUsers() {
     const response = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, {
         method: 'GET',
@@ -32,7 +32,7 @@ async function getUsers() {
         userSelect.innerHTML = '';
         data.forEach(user => {
             const option = document.createElement('option');
-            option.value = user.id;
+            option.value    = user.id;
             option.textContent = user.username;
             userSelect.appendChild(option);
             users[user.id] = user;
@@ -44,15 +44,11 @@ function getGeolocation() {
     return new Promise((resolve, reject) => {
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
-                position => {
-                    resolve({
-                        latitude: position.coords.latitude,
-                        longitude: position.coords.longitude
-                    });
-                },
-                error => {
-                    reject(error);
-                }
+                position => resolve({
+                    latitude:  position.coords.latitude,
+                    longitude: position.coords.longitude
+                }),
+                error => reject(error)
             );
         } else {
             reject(new Error('Geolocation is not supported by this browser.'));
@@ -66,22 +62,19 @@ async function getCityFromCoordinates(latitude, longitude) {
     return data.address.city || data.address.town || data.address.village || 'Unknown';
 }
 
-// BUG FIX #4 : suppression du champ "user_id" (redondant avec id_sent)
+// BUG FIX #4 : suppression du champ "user_id"
 // BUG FIX #7 : feedback utilisateur en cas d'échec de géolocalisation
 async function sendMessage(userId, content) {
     console.log('Sending message:', { userId, content });
-    let latitude = null;
-    let longitude = null;
-    let city = null;
+    let latitude = null, longitude = null, city = null;
 
     try {
         const geolocation = await getGeolocation();
-        latitude = geolocation.latitude;
+        latitude  = geolocation.latitude;
         longitude = geolocation.longitude;
-        city = await getCityFromCoordinates(latitude, longitude);
+        city      = await getCityFromCoordinates(latitude, longitude);
     } catch (error) {
         console.warn('Géolocalisation indisponible, message envoyé sans position :', error);
-        // On continue quand même — le message sera envoyé sans coordonnées
     }
 
     try {
@@ -93,13 +86,13 @@ async function sendMessage(userId, content) {
                 'Authorization': `Bearer ${supabaseKey}`
             },
             body: JSON.stringify({
-                id_sent: userId,
-                content: content,
-                created_at: new Date().toISOString(),
+                id_sent:     userId,
+                content:     content,
+                created_at:  new Date().toISOString(),
                 id_received: userSelect.value,
-                latitude: latitude,
-                longitude: longitude,
-                city: city
+                latitude:    latitude,
+                longitude:   longitude,
+                city:        city
             })
         });
         const data = await response.json();
@@ -154,12 +147,14 @@ async function getMessages() {
         console.log('Messages fetched:', data);
         chatMessages.innerHTML = '';
         let lastDate = null;
-        data.forEach(message => {
-            const messageDate = new Date(message.created_at).toLocaleDateString();
-            const messageTime = new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            const senderName = users[message.id_sent]?.username || 'Unknown';
-            const city = message.city ? ` (${message.city} - ${messageTime})` : '';
 
+        data.forEach(message => {
+            const dateObj   = new Date(message.created_at);
+            const messageDate = dateObj.toLocaleDateString();
+            const messageTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const senderName  = users[message.id_sent]?.username || 'Unknown';
+
+            // Date separator
             if (messageDate !== lastDate) {
                 const dateElement = document.createElement('div');
                 dateElement.textContent = messageDate;
@@ -168,11 +163,32 @@ async function getMessages() {
                 lastDate = messageDate;
             }
 
+            // Bubble wrapper
             const messageElement = document.createElement('div');
-            messageElement.textContent = `${senderName}${city}: ${message.content}`;
             messageElement.classList.add('message');
+
+            // Sender label
+            const senderSpan = document.createElement('span');
+            senderSpan.classList.add('msg-sender');
+            senderSpan.textContent = senderName;
+
+            // Main text
+            const textNode = document.createTextNode(message.content);
+
+            // Meta (city + time)
+            const metaSpan = document.createElement('span');
+            metaSpan.classList.add('msg-meta');
+            metaSpan.textContent = message.city
+                ? `📍 ${message.city} · ${messageTime}`
+                : messageTime;
+
+            messageElement.appendChild(senderSpan);
+            messageElement.appendChild(textNode);
+            messageElement.appendChild(metaSpan);
+
             if (message.id_sent === currentUserId) {
                 messageElement.classList.add('sent');
+                // Delete button (only on own messages)
                 const deleteButton = document.createElement('span');
                 deleteButton.textContent = '✖';
                 deleteButton.classList.add('delete-button');
@@ -181,37 +197,38 @@ async function getMessages() {
             } else {
                 messageElement.classList.add('received');
             }
+
             chatMessages.appendChild(messageElement);
         });
+
+        // Auto-scroll to bottom
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 }
 
 // BUG FIX #5 : commentaire corrigé (1500ms = 1.5 secondes)
 function refreshMessages() {
     if (refreshInterval) clearInterval(refreshInterval);
-    refreshInterval = setInterval(getMessages, 1500); // Rafraîchir les messages toutes les 1.5 secondes
+    refreshInterval = setInterval(getMessages, 1500);
 }
 
-// BUG FIX #3 : la vérification du mot de passe côté client est supprimée.
-// Le login doit être géré par une Edge Function côté serveur.
-// En attendant, on garde la logique minimale sans exposer le mot de passe.
+// BUG FIX #3 : mot de passe non vérifié côté client
 function login() {
     const username = loginUsername.value;
     const password = loginPassword.value;
-    const user = Object.values(users).find(u => u.username === username);
+    const user     = Object.values(users).find(u => u.username === username);
 
     if (!user) {
         alert('Utilisateur non trouvé');
         return;
     }
 
-    // ⚠️ À remplacer par un appel à une Edge Function qui vérifie le mot de passe côté serveur.
-    // Pour l'instant, on accepte la connexion si l'utilisateur existe (mot de passe non vérifié ici).
+    // ⚠️ À remplacer par une Edge Function côté serveur.
     currentUserId = user.id;
     alert('Connexion réussie');
-    loginContainer.style.display = 'none';
-    connectedUser.style.display = 'block';
-    connectedUsername.textContent = user.username;
+    loginContainer.style.display  = 'none';
+    connectedUser.style.display   = 'block';
+    connectedUsername.textContent  = user.username;
     getMessages();
     refreshMessages();
 }
@@ -223,8 +240,8 @@ function logout() {
         refreshInterval = null;
     }
     loginContainer.style.display = 'block';
-    connectedUser.style.display = 'none';
-    chatMessages.innerHTML = '';
+    connectedUser.style.display  = 'none';
+    chatMessages.innerHTML       = '';
 }
 
 // Fonction mutualisée pour envoyer un message
@@ -233,7 +250,10 @@ async function handleSend() {
         const content = messageInput.value;
         if (content.trim() !== '') {
             const ok = await sendMessage(currentUserId, content);
-            if (ok) messageInput.value = '';
+            if (ok) {
+                messageInput.value = '';
+                messageInput.focus();
+            }
         }
     } else {
         alert('Veuillez vous connecter pour envoyer un message');
@@ -242,7 +262,7 @@ async function handleSend() {
 
 sendButton.addEventListener('click', handleSend);
 
-// BUG FIX #8 : envoi du message avec la touche Enter
+// BUG FIX #8 : envoi avec Enter
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         e.preventDefault();

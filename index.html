@@ -4,26 +4,35 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Messagerie Instantanée</title>
-    <!-- BUG FIX #9 : "styles.css" → "style.css" pour correspondre au fichier réel -->
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <!-- Subtle grid texture layer -->
+    <div class="page-grid-overlay"></div>
+
     <div class="login-container" id="login-container">
         <h2>Connexion</h2>
-        <input type="text" id="login-username" placeholder="Nom d'utilisateur">
+        <p class="subtitle">Bienvenue, connectez-vous pour continuer</p>
+        <input type="text"     id="login-username" placeholder="Nom d'utilisateur">
         <input type="password" id="login-password" placeholder="Mot de passe">
         <button id="login-button">Se connecter</button>
-        <p class="inscription-link"><a href="inscription.html">S'inscrire</a></p>
+        <p class="inscription-link"><a href="inscription.html">Pas de compte ? → S'inscrire</a></p>
     </div>
+
     <div class="connected-user" id="connected-user" style="display: none;">
-        <p>Utilisateur connecté : <span id="connected-username"></span> <button id="logout-button">Déconnexion</button></p>
+        <p>
+            <span class="status-dot"></span>
+            Connecté : <span id="connected-username"></span>
+        </p>
+        <button id="logout-button">Déconnexion</button>
     </div>
+
     <div class="chat-container">
         <div class="chat-header">
-            <h1>Messagerie Instantanée</h1>
+            <h1>💬 <span>Messagerie</span> Instantanée</h1>
         </div>
         <div class="user-selection">
-            <label for="user-select">Sélectionnez un utilisateur :</label>
+            <label for="user-select">Vers</label>
             <select id="user-select">
                 <!-- Les options seront ajoutées ici par JavaScript -->
             </select>
@@ -32,10 +41,11 @@
             <!-- Les messages seront affichés ici -->
         </div>
         <div class="chat-input">
-            <input type="text" id="message-input" placeholder="Tapez votre message...">
+            <input type="text" id="message-input" placeholder="Tapez votre message…">
             <button id="send-button">Envoyer</button>
         </div>
     </div>
+
     <script src="app.js"></script>
 </body>
 </html>

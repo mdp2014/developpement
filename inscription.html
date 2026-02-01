@@ -7,15 +7,39 @@
     <link rel="stylesheet" href="inscription.css">
 </head>
 <body>
+    <!-- Subtle grid texture layer -->
+    <div class="page-grid-overlay"></div>
+
     <div class="inscription-container" id="inscription-container">
+        <!-- Animated icon at the top of the card -->
+        <div class="card-icon">✦</div>
         <h2>Créer un compte</h2>
-        <input type="text" id="reg-username" placeholder="Nom d'utilisateur" autocomplete="off">
-        <input type="password" id="reg-password" placeholder="Mot de passe">
+        <p class="subtitle">Rejoignez la messagerie en quelques secondes</p>
+
+        <input type="text"     id="reg-username"         placeholder="Nom d'utilisateur" autocomplete="off">
+        <input type="password" id="reg-password"         placeholder="Mot de passe">
         <input type="password" id="reg-password-confirm" placeholder="Confirmer le mot de passe">
         <div id="reg-error" class="error-message" style="display: none;"></div>
         <button id="reg-button">S'inscrire</button>
         <p class="back-link"><a href="index.html">← Retour à la connexion</a></p>
     </div>
+
+    <!-- Full-screen success overlay (checkmark + text) -->
+    <div class="success-overlay" id="success-overlay">
+        <div class="success-circle">
+            <svg viewBox="0 0 56 56">
+                <path class="check-path" d="M12 30 L24 42 L44 16"/>
+            </svg>
+        </div>
+        <div class="success-text">
+            <h2>Compte créé !</h2>
+            <p>Vous êtes redirigé vers la connexion…</p>
+        </div>
+    </div>
+
+    <!-- Canvas for confetti particles -->
+    <canvas id="confetti-canvas"></canvas>
+
     <script src="inscription.js"></script>
 </body>
 </html>
