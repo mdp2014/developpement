@@ -25,6 +25,7 @@ body {
     margin: 10px 0;
     border: 1px solid #ddd;
     border-radius: 4px;
+    box-sizing: border-box;
 }
 
 .login-container button {
@@ -92,11 +93,15 @@ body {
     border-radius: 4px;
 }
 
+/* BUG FIX #10 : ajout de display:flex + flex-direction:column
+   pour que align-self sur les .message enfants ait un effet */
 .chat-messages {
     height: 300px;
     overflow-y: auto;
     padding: 10px;
     border-bottom: 1px solid #ddd;
+    display: flex;
+    flex-direction: column;
 }
 
 .chat-messages .message {
@@ -124,6 +129,7 @@ body {
     text-align: center;
     margin: 10px 0;
     font-weight: bold;
+    align-self: stretch;
 }
 
 .chat-messages .delete-button {
