@@ -11,14 +11,61 @@ const loginContainer    = document.getElementById('login-container');
 const connectedUser     = document.getElementById('connected-user');
 const connectedUsername = document.getElementById('connected-username');
 const logoutButton      = document.getElementById('logout-button');
+const typingIndicator   = document.getElementById('typing-indicator');
 
 let users = {};
 let currentUserId = null;
 let refreshInterval = null;
-// Variable pour stocker les messages existants et éviter le scintillement
+let typingTimeout = null;
+let isTyping = false;
 let currentMessages = [];
+let lastMessageCount = 0;
 
-// Récupère uniquement la liste des utilisateurs pour le sélecteur (sans les mots de passe)
+// ============================================================
+// NOTIFICATIONS PUSH
+// ============================================================
+async function requestNotificationPermission() {
+    if (!('Notification' in window)) {
+        console.log('Ce navigateur ne supporte pas les notifications');
+        return false;
+    }
+
+    if (Notification.permission === 'granted') {
+        return true;
+    }
+
+    if (Notification.permission !== 'denied') {
+        const permission = await Notification.requestPermission();
+        return permission === 'granted';
+    }
+
+    return false;
+}
+
+function showNotification(title, body, icon = '💬') {
+    if (Notification.permission === 'granted' && document.hidden) {
+        const notification = new Notification(title, {
+            body: body,
+            icon: icon,
+            badge: icon,
+            tag: 'message-notification',
+            requireInteraction: false,
+            silent: false
+        });
+
+        notification.onclick = () => {
+            window.focus();
+            notification.close();
+        };
+
+        // Auto-fermer après 5 secondes
+        setTimeout(() => notification.close(), 5000);
+    }
+}
+
+// ============================================================
+// GESTION DES UTILISATEURS
+// ============================================================
 async function getUsers() {
     const response = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, {
         method: 'GET',
@@ -42,6 +89,9 @@ async function getUsers() {
     }
 }
 
+// ============================================================
+// GÉOLOCALISATION
+// ============================================================
 function getGeolocation() {
     return new Promise((resolve, reject) => {
         if (navigator.geolocation) {
@@ -64,6 +114,125 @@ async function getCityFromCoordinates(latitude, longitude) {
     return data.address.city || data.address.town || data.address.village || 'Unknown';
 }
 
+// ============================================================
+// INDICATEUR "EN TRAIN D'ÉCRIRE"
+// ============================================================
+async function updateTypingStatus(isTypingNow) {
+    if (!currentUserId || !userSelect.value) return;
+
+    try {
+        // Vérifier si un statut existe déjà
+        const checkResponse = await fetch(
+            `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
+            {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`
+                }
+            }
+        );
+        const existingStatus = await checkResponse.json();
+
+        if (existingStatus.length > 0) {
+            // Mettre à jour le statut existant
+            await fetch(
+                `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
+                {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'apikey': supabaseKey,
+                        'Authorization': `Bearer ${supabaseKey}`
+                    },
+                    body: JSON.stringify({
+                        is_typing: isTypingNow,
+                        updated_at: new Date().toISOString()
+                    })
+                }
+            );
+        } else {
+            // Créer un nouveau statut
+            await fetch(`${supabaseUrl}/rest/v1/typing_status`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Prefer': 'return=minimal'
+                },
+                body: JSON.stringify({
+                    user_id: currentUserId,
+                    recipient_id: userSelect.value,
+                    is_typing: isTypingNow,
+                    updated_at: new Date().toISOString()
+                })
+            });
+        }
+    } catch (error) {
+        console.error('Erreur lors de la mise à jour du statut de frappe:', error);
+    }
+}
+
+async function checkTypingStatus() {
+    if (!currentUserId || !userSelect.value) {
+        typingIndicator.style.display = 'none';
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${userSelect.value}&recipient_id=eq.${currentUserId}&select=*`,
+            {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`
+                }
+            }
+        );
+        const data = await response.json();
+
+        if (data.length > 0) {
+            const status = data[0];
+            const updatedAt = new Date(status.updated_at);
+            const now = new Date();
+            const secondsSinceUpdate = (now - updatedAt) / 1000;
+
+            // Afficher l'indicateur seulement si la mise à jour est récente (moins de 3 secondes)
+            if (status.is_typing && secondsSinceUpdate < 3) {
+                const recipientName = users[userSelect.value]?.username || 'L\'utilisateur';
+                typingIndicator.textContent = `${recipientName} est en train d'écrire...`;
+                typingIndicator.style.display = 'block';
+            } else {
+                typingIndicator.style.display = 'none';
+            }
+        } else {
+            typingIndicator.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('Erreur lors de la vérification du statut de frappe:', error);
+    }
+}
+
+// Gérer la saisie dans le champ de message
+messageInput.addEventListener('input', () => {
+    if (!isTyping) {
+        isTyping = true;
+        updateTypingStatus(true);
+    }
+
+    // Réinitialiser le timeout
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+        isTyping = false;
+        updateTypingStatus(false);
+    }, 2000); // Arrêter après 2 secondes d'inactivité
+});
+
+// ============================================================
+// ENVOI DE MESSAGES
+// ============================================================
 async function sendMessage(userId, content) {
     console.log('Sending message:', { userId, content });
     let latitude = null, longitude = null, city = null;
@@ -76,6 +245,11 @@ async function sendMessage(userId, content) {
     } catch (error) {
         console.warn('Géolocalisation indisponible, message envoyé sans position :', error);
     }
+
+    // Arrêter l'indicateur de frappe
+    isTyping = false;
+    clearTimeout(typingTimeout);
+    await updateTypingStatus(false);
 
     try {
         const response = await fetch(`${supabaseUrl}/rest/v1/messages`, {
@@ -90,6 +264,7 @@ async function sendMessage(userId, content) {
                 content:     content,
                 created_at:  new Date().toISOString(),
                 id_received: userSelect.value,
+                read_at:     null,
                 latitude:    latitude,
                 longitude:   longitude,
                 city:        city
@@ -109,6 +284,41 @@ async function sendMessage(userId, content) {
     return false;
 }
 
+// ============================================================
+// ACCUSÉS DE RÉCEPTION
+// ============================================================
+async function markMessagesAsRead() {
+    if (!currentUserId || !userSelect.value) return;
+
+    try {
+        // Marquer comme lus tous les messages reçus de l'utilisateur sélectionné qui ne sont pas encore lus
+        const response = await fetch(
+            `${supabaseUrl}/rest/v1/messages?id_sent=eq.${userSelect.value}&id_received=eq.${currentUserId}&read_at=is.null`,
+            {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Prefer': 'return=minimal'
+                },
+                body: JSON.stringify({
+                    read_at: new Date().toISOString()
+                })
+            }
+        );
+
+        if (response.ok) {
+            console.log('Messages marqués comme lus');
+        }
+    } catch (error) {
+        console.error('Erreur lors du marquage des messages comme lus:', error);
+    }
+}
+
+// ============================================================
+// RÉCUPÉRATION DES MESSAGES
+// ============================================================
 async function deleteMessage(messageId) {
     const response = await fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
         method: 'DELETE',
@@ -129,6 +339,7 @@ async function getMessages() {
     if (!currentUserId || !userSelect.value) {
         chatMessages.innerHTML = '';
         currentMessages = [];
+        lastMessageCount = 0;
         return;
     }
 
@@ -147,11 +358,30 @@ async function getMessages() {
     } else {
         console.log('Messages fetched:', data);
         
+        // Détecter les nouveaux messages pour les notifications
+        if (data.length > lastMessageCount && lastMessageCount > 0) {
+            const newMessages = data.slice(lastMessageCount);
+            newMessages.forEach(msg => {
+                if (msg.id_sent === userSelect.value && msg.id_received === currentUserId) {
+                    const senderName = users[msg.id_sent]?.username || 'Un utilisateur';
+                    showNotification(
+                        `Nouveau message de ${senderName}`,
+                        msg.content.substring(0, 50) + (msg.content.length > 50 ? '...' : '')
+                    );
+                }
+            });
+        }
+        lastMessageCount = data.length;
+
+        // Marquer les messages comme lus
+        await markMessagesAsRead();
+        
         // Vérifier s'il y a de nouveaux messages ou des suppressions
         const dataIds = data.map(m => m.id);
         const currentIds = currentMessages.map(m => m.id);
         const hasChanges = dataIds.length !== currentIds.length || 
-                          dataIds.some((id, idx) => id !== currentIds[idx]);
+                          dataIds.some((id, idx) => id !== currentIds[idx]) ||
+                          data.some((msg, idx) => currentMessages[idx]?.read_at !== msg.read_at);
         
         // Ne redessiner que s'il y a des changements
         if (hasChanges) {
@@ -189,12 +419,26 @@ async function getMessages() {
                 // Main text
                 const textNode = document.createTextNode(message.content);
 
-                // Meta (city + time)
+                // Meta (city + time + read status)
                 const metaSpan = document.createElement('span');
                 metaSpan.classList.add('msg-meta');
-                metaSpan.textContent = message.city
+                
+                let metaText = message.city
                     ? `📍 ${message.city} · ${messageTime}`
                     : messageTime;
+
+                // Ajouter l'indicateur de lecture pour les messages envoyés
+                if (message.id_sent === currentUserId) {
+                    if (message.read_at) {
+                        metaText += ' · ✓✓ Lu';
+                        metaSpan.classList.add('read');
+                    } else {
+                        metaText += ' · ✓ Envoyé';
+                        metaSpan.classList.add('sent');
+                    }
+                }
+
+                metaSpan.textContent = metaText;
 
                 messageElement.appendChild(senderSpan);
                 messageElement.appendChild(textNode);
@@ -223,12 +467,20 @@ async function getMessages() {
     }
 }
 
+// ============================================================
+// RAFRAÎCHISSEMENT
+// ============================================================
 function refreshMessages() {
     if (refreshInterval) clearInterval(refreshInterval);
-    refreshInterval = setInterval(getMessages, 1500);
+    refreshInterval = setInterval(() => {
+        getMessages();
+        checkTypingStatus();
+    }, 1000); // Vérifier toutes les secondes
 }
 
-// CORRECTION DU BUG DE SÉCURITÉ : Vérification du mot de passe
+// ============================================================
+// CONNEXION / DÉCONNEXION
+// ============================================================
 async function login() {
     const username = loginUsername.value.trim();
     const password = loginPassword.value;
@@ -239,7 +491,6 @@ async function login() {
     }
 
     try {
-        // Requête pour récupérer l'utilisateur avec son mot de passe
         const response = await fetch(
             `${supabaseUrl}/rest/v1/users?select=id,username,password&username=eq.${encodeURIComponent(username)}`,
             {
@@ -266,20 +517,20 @@ async function login() {
 
         const user = data[0];
 
-        // Vérification du mot de passe
         if (user.password !== password) {
             alert('Mot de passe incorrect');
             return;
         }
 
-        // Connexion réussie
+        // Demander la permission pour les notifications
+        await requestNotificationPermission();
+
         currentUserId = user.id;
         alert('Connexion réussie');
         loginContainer.style.display  = 'none';
         connectedUser.style.display   = 'block';
         connectedUsername.textContent  = user.username;
         
-        // Ajouter l'utilisateur connecté à la liste locale
         users[user.id] = { id: user.id, username: user.username };
         
         getMessages();
@@ -291,8 +542,16 @@ async function login() {
     }
 }
 
-function logout() {
+async function logout() {
+    // Arrêter l'indicateur de frappe
+    if (isTyping) {
+        await updateTypingStatus(false);
+    }
+    
     currentUserId = null;
+    isTyping = false;
+    clearTimeout(typingTimeout);
+    
     if (refreshInterval) {
         clearInterval(refreshInterval);
         refreshInterval = null;
@@ -301,18 +560,20 @@ function logout() {
     connectedUser.style.display  = 'none';
     chatMessages.innerHTML       = '';
     currentMessages = [];
+    lastMessageCount = 0;
+    typingIndicator.style.display = 'none';
 }
 
-// Fonction mutualisée pour envoyer un message
+// ============================================================
+// ENVOI DE MESSAGES
+// ============================================================
 async function handleSend() {
     if (currentUserId) {
         const content = messageInput.value.trim();
         if (content !== '') {
-            // Effacer le champ immédiatement pour un meilleur feedback
             messageInput.value = '';
             messageInput.focus();
             
-            // Envoyer le message
             await sendMessage(currentUserId, content);
         }
     } else {
@@ -322,7 +583,6 @@ async function handleSend() {
 
 sendButton.addEventListener('click', handleSend);
 
-// Envoi avec Enter
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         e.preventDefault();
@@ -333,7 +593,6 @@ messageInput.addEventListener('keydown', (e) => {
 loginButton.addEventListener('click', login);
 logoutButton.addEventListener('click', logout);
 
-// Permettre la connexion avec Enter
 loginPassword.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         e.preventDefault();
@@ -349,5 +608,14 @@ window.onload = () => {
 
 userSelect.addEventListener('change', () => {
     currentMessages = [];
+    lastMessageCount = 0;
+    typingIndicator.style.display = 'none';
     getMessages();
+});
+
+// Nettoyer le statut de frappe quand on quitte la page
+window.addEventListener('beforeunload', () => {
+    if (isTyping && currentUserId) {
+        updateTypingStatus(false);
+    }
 });

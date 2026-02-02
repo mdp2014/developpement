@@ -360,6 +360,59 @@ body::after {
 }
 
 /* ============================================
+   INDICATEUR "EN TRAIN D'ÉCRIRE"
+   ============================================ */
+.typing-indicator {
+    padding: 8px 16px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.75rem;
+    color: var(--accent);
+    font-style: italic;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    animation: fadeIn 0.3s ease;
+}
+
+.typing-dots {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+}
+
+.typing-dots span {
+    width: 5px;
+    height: 5px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: typingBounce 1.4s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(1) {
+    animation-delay: 0s;
+}
+
+.typing-dots span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.typing-dots span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes typingBounce {
+    0%, 60%, 100% {
+        transform: translateY(0);
+        opacity: 0.7;
+    }
+    30% {
+        transform: translateY(-6px);
+        opacity: 1;
+    }
+}
+
+/* ============================================
    MESSAGES AREA
    ============================================ */
 .chat-messages {
@@ -454,6 +507,16 @@ body::after {
     font-size: 0.66rem;
     opacity: 0.5;
     margin-top: 3px;
+}
+
+/* Statut de lecture (accusés de réception) */
+.chat-messages .message .msg-meta.read {
+    color: var(--accent);
+    opacity: 0.8;
+}
+
+.chat-messages .message .msg-meta.sent {
+    opacity: 0.5;
 }
 
 /* Delete button */
