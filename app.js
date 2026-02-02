@@ -15,6 +15,8 @@ const logoutButton      = document.getElementById('logout-button');
 let users = {};
 let currentUserId = null;
 let refreshInterval = null;
+// Variable pour stocker les messages existants et éviter le scintillement
+let currentMessages = [];
 
 // BUG FIX #2 : on ne récupère plus "password"
 async function getUsers() {
@@ -128,6 +130,7 @@ async function deleteMessage(messageId) {
 async function getMessages() {
     if (!currentUserId || !userSelect.value) {
         chatMessages.innerHTML = '';
+        currentMessages = [];
         return;
     }
 
@@ -145,64 +148,80 @@ async function getMessages() {
         console.error('Error fetching messages:', data);
     } else {
         console.log('Messages fetched:', data);
-        chatMessages.innerHTML = '';
-        let lastDate = null;
+        
+        // Vérifier s'il y a de nouveaux messages ou des suppressions
+        const dataIds = data.map(m => m.id);
+        const currentIds = currentMessages.map(m => m.id);
+        const hasChanges = dataIds.length !== currentIds.length || 
+                          dataIds.some((id, idx) => id !== currentIds[idx]);
+        
+        // Ne redessiner que s'il y a des changements
+        if (hasChanges) {
+            // Sauvegarder la position de scroll actuelle
+            const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
+            
+            currentMessages = data;
+            chatMessages.innerHTML = '';
+            let lastDate = null;
 
-        data.forEach(message => {
-            const dateObj   = new Date(message.created_at);
-            const messageDate = dateObj.toLocaleDateString();
-            const messageTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            const senderName  = users[message.id_sent]?.username || 'Unknown';
+            data.forEach(message => {
+                const dateObj   = new Date(message.created_at);
+                const messageDate = dateObj.toLocaleDateString();
+                const messageTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const senderName  = users[message.id_sent]?.username || 'Unknown';
 
-            // Date separator
-            if (messageDate !== lastDate) {
-                const dateElement = document.createElement('div');
-                dateElement.textContent = messageDate;
-                dateElement.classList.add('date');
-                chatMessages.appendChild(dateElement);
-                lastDate = messageDate;
+                // Date separator
+                if (messageDate !== lastDate) {
+                    const dateElement = document.createElement('div');
+                    dateElement.textContent = messageDate;
+                    dateElement.classList.add('date');
+                    chatMessages.appendChild(dateElement);
+                    lastDate = messageDate;
+                }
+
+                // Bubble wrapper
+                const messageElement = document.createElement('div');
+                messageElement.classList.add('message');
+
+                // Sender label
+                const senderSpan = document.createElement('span');
+                senderSpan.classList.add('msg-sender');
+                senderSpan.textContent = senderName;
+
+                // Main text
+                const textNode = document.createTextNode(message.content);
+
+                // Meta (city + time)
+                const metaSpan = document.createElement('span');
+                metaSpan.classList.add('msg-meta');
+                metaSpan.textContent = message.city
+                    ? `📍 ${message.city} · ${messageTime}`
+                    : messageTime;
+
+                messageElement.appendChild(senderSpan);
+                messageElement.appendChild(textNode);
+                messageElement.appendChild(metaSpan);
+
+                if (message.id_sent === currentUserId) {
+                    messageElement.classList.add('sent');
+                    // Delete button (only on own messages)
+                    const deleteButton = document.createElement('span');
+                    deleteButton.textContent = '✖';
+                    deleteButton.classList.add('delete-button');
+                    deleteButton.addEventListener('click', () => deleteMessage(message.id));
+                    messageElement.appendChild(deleteButton);
+                } else {
+                    messageElement.classList.add('received');
+                }
+
+                chatMessages.appendChild(messageElement);
+            });
+
+            // Auto-scroll uniquement si l'utilisateur était déjà en bas
+            if (wasAtBottom) {
+                chatMessages.scrollTop = chatMessages.scrollHeight;
             }
-
-            // Bubble wrapper
-            const messageElement = document.createElement('div');
-            messageElement.classList.add('message');
-
-            // Sender label
-            const senderSpan = document.createElement('span');
-            senderSpan.classList.add('msg-sender');
-            senderSpan.textContent = senderName;
-
-            // Main text
-            const textNode = document.createTextNode(message.content);
-
-            // Meta (city + time)
-            const metaSpan = document.createElement('span');
-            metaSpan.classList.add('msg-meta');
-            metaSpan.textContent = message.city
-                ? `📍 ${message.city} · ${messageTime}`
-                : messageTime;
-
-            messageElement.appendChild(senderSpan);
-            messageElement.appendChild(textNode);
-            messageElement.appendChild(metaSpan);
-
-            if (message.id_sent === currentUserId) {
-                messageElement.classList.add('sent');
-                // Delete button (only on own messages)
-                const deleteButton = document.createElement('span');
-                deleteButton.textContent = '✖';
-                deleteButton.classList.add('delete-button');
-                deleteButton.addEventListener('click', () => deleteMessage(message.id));
-                messageElement.appendChild(deleteButton);
-            } else {
-                messageElement.classList.add('received');
-            }
-
-            chatMessages.appendChild(messageElement);
-        });
-
-        // Auto-scroll to bottom
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
     }
 }
 
@@ -242,18 +261,20 @@ function logout() {
     loginContainer.style.display = 'block';
     connectedUser.style.display  = 'none';
     chatMessages.innerHTML       = '';
+    currentMessages = [];
 }
 
 // Fonction mutualisée pour envoyer un message
 async function handleSend() {
     if (currentUserId) {
-        const content = messageInput.value;
-        if (content.trim() !== '') {
-            const ok = await sendMessage(currentUserId, content);
-            if (ok) {
-                messageInput.value = '';
-                messageInput.focus();
-            }
+        const content = messageInput.value.trim();
+        if (content !== '') {
+            // Effacer le champ immédiatement pour un meilleur feedback
+            messageInput.value = '';
+            messageInput.focus();
+            
+            // Envoyer le message
+            await sendMessage(currentUserId, content);
         }
     } else {
         alert('Veuillez vous connecter pour envoyer un message');
@@ -279,4 +300,7 @@ window.onload = () => {
     });
 };
 
-userSelect.addEventListener('change', getMessages);
+userSelect.addEventListener('change', () => {
+    currentMessages = [];
+    getMessages();
+});
