@@ -18,7 +18,7 @@ let refreshInterval = null;
 // Variable pour stocker les messages existants et éviter le scintillement
 let currentMessages = [];
 
-// BUG FIX #2 : on ne récupère plus "password"
+// Récupère uniquement la liste des utilisateurs pour le sélecteur (sans les mots de passe)
 async function getUsers() {
     const response = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, {
         method: 'GET',
@@ -64,8 +64,6 @@ async function getCityFromCoordinates(latitude, longitude) {
     return data.address.city || data.address.town || data.address.village || 'Unknown';
 }
 
-// BUG FIX #4 : suppression du champ "user_id"
-// BUG FIX #7 : feedback utilisateur en cas d'échec de géolocalisation
 async function sendMessage(userId, content) {
     console.log('Sending message:', { userId, content });
     let latitude = null, longitude = null, city = null;
@@ -225,31 +223,72 @@ async function getMessages() {
     }
 }
 
-// BUG FIX #5 : commentaire corrigé (1500ms = 1.5 secondes)
 function refreshMessages() {
     if (refreshInterval) clearInterval(refreshInterval);
     refreshInterval = setInterval(getMessages, 1500);
 }
 
-// BUG FIX #3 : mot de passe non vérifié côté client
-function login() {
-    const username = loginUsername.value;
+// CORRECTION DU BUG DE SÉCURITÉ : Vérification du mot de passe
+async function login() {
+    const username = loginUsername.value.trim();
     const password = loginPassword.value;
-    const user     = Object.values(users).find(u => u.username === username);
 
-    if (!user) {
-        alert('Utilisateur non trouvé');
+    if (!username || !password) {
+        alert('Veuillez remplir tous les champs');
         return;
     }
 
-    // ⚠️ À remplacer par une Edge Function côté serveur.
-    currentUserId = user.id;
-    alert('Connexion réussie');
-    loginContainer.style.display  = 'none';
-    connectedUser.style.display   = 'block';
-    connectedUsername.textContent  = user.username;
-    getMessages();
-    refreshMessages();
+    try {
+        // Requête pour récupérer l'utilisateur avec son mot de passe
+        const response = await fetch(
+            `${supabaseUrl}/rest/v1/users?select=id,username,password&username=eq.${encodeURIComponent(username)}`,
+            {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`
+                }
+            }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            console.error('Erreur lors de la connexion:', data);
+            alert('Erreur de connexion');
+            return;
+        }
+
+        if (data.length === 0) {
+            alert('Utilisateur non trouvé');
+            return;
+        }
+
+        const user = data[0];
+
+        // Vérification du mot de passe
+        if (user.password !== password) {
+            alert('Mot de passe incorrect');
+            return;
+        }
+
+        // Connexion réussie
+        currentUserId = user.id;
+        alert('Connexion réussie');
+        loginContainer.style.display  = 'none';
+        connectedUser.style.display   = 'block';
+        connectedUsername.textContent  = user.username;
+        
+        // Ajouter l'utilisateur connecté à la liste locale
+        users[user.id] = { id: user.id, username: user.username };
+        
+        getMessages();
+        refreshMessages();
+
+    } catch (error) {
+        console.error('Erreur lors de la connexion:', error);
+        alert('Erreur de connexion');
+    }
 }
 
 function logout() {
@@ -283,7 +322,7 @@ async function handleSend() {
 
 sendButton.addEventListener('click', handleSend);
 
-// BUG FIX #8 : envoi avec Enter
+// Envoi avec Enter
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         e.preventDefault();
@@ -293,6 +332,14 @@ messageInput.addEventListener('keydown', (e) => {
 
 loginButton.addEventListener('click', login);
 logoutButton.addEventListener('click', logout);
+
+// Permettre la connexion avec Enter
+loginPassword.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        login();
+    }
+});
 
 window.onload = () => {
     getUsers().then(() => {
