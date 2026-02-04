@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Messagerie Instantanée</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Messagerie Instantanée - Améliorée</title>
+    <link rel="stylesheet" href="style-enhanced.css">
 </head>
 <body>
     <!-- Subtle grid texture layer -->
@@ -23,6 +23,7 @@
         <p>
             <span class="status-dot"></span>
             Connecté : <span id="connected-username"></span>
+            <span id="network-indicator" class="network-indicator" title="Qualité réseau"></span>
         </p>
         <button id="logout-button">Déconnexion</button>
     </div>
@@ -30,6 +31,7 @@
     <div class="chat-container">
         <div class="chat-header">
             <h1>💬 <span>Messagerie</span> Instantanée</h1>
+            <button id="summary-button" class="summary-btn" title="Générer un résumé">📝 Résumé</button>
         </div>
         <div class="user-selection">
             <label for="user-select">Vers</label>
@@ -38,21 +40,25 @@
             </select>
         </div>
         <!-- Indicateur "en train d'écrire" -->
-        <div class="typing-indicator" id="typing-indicator" style="display: none;">
-            <span class="typing-dots">
-                <span></span>
-                <span></span>
-                <span></span>
-            </span>
-        </div>
+        <div class="typing-indicator" id="typing-indicator" style="display: none;"></div>
+        
+        <!-- Réponses rapides suggérées -->
+        <div class="quick-replies-container" id="quick-replies" style="display: none;"></div>
+        
         <div class="chat-messages" id="chat-messages">
             <!-- Les messages seront affichés ici -->
         </div>
+        
         <div class="chat-input">
+            <input type="file" id="file-input" accept="image/*,audio/*,video/*,.pdf,.doc,.docx" style="display: none;">
+            <button id="attach-button" class="icon-button" title="Joindre un fichier">📎</button>
+            <button id="voice-button" class="icon-button" title="Message vocal">🎤</button>
             <input type="text" id="message-input" placeholder="Tapez votre message…">
             <button id="emoji-button" class="emoji-button" title="Ajouter un emoji">😊</button>
             <button id="send-button">Envoyer</button>
         </div>
+        
+        <div id="upload-progress" class="upload-progress" style="display: none;"></div>
     </div>
 
     <!-- Emoji Picker Popup -->
@@ -60,6 +66,16 @@
         <emoji-picker></emoji-picker>
     </div>
 
-    <script type="module" src="app.js"></script>
+    <!-- Summary Modal -->
+    <div id="summary-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close-modal" id="close-summary">&times;</span>
+            <div id="summary-content">
+                <div class="loading">Chargement...</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="app-enhanced.js"></script>
 </body>
 </html>
