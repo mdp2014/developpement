@@ -27,6 +27,130 @@ let currentMessages = [];
 let lastMessageCount = 0;
 let emojiPickerInstance = null;
 let emojiPickerOverlay = null;
+let sessionValidationInterval = null;
+
+const SESSION_STORAGE_KEY = 'persistent_session_v1';
+const SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
+const SESSION_CHECK_INTERVAL_MS = 1000 * 60 * 5; // 5 minutes
+
+function generateRefreshToken() {
+    const bytes = new Uint8Array(32);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashPassword(password) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    const digest = await window.crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(digest))
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+function loadSession() {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch (error) {
+        console.warn('Session corrompue, suppression du stockage.', error);
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        return null;
+    }
+}
+
+function saveSession(session) {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+}
+
+function clearSession() {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+}
+
+function stopSessionValidation() {
+    if (sessionValidationInterval) {
+        clearInterval(sessionValidationInterval);
+        sessionValidationInterval = null;
+    }
+}
+
+async function validateSession(session) {
+    if (!session || !session.userId || !session.refreshToken) {
+        return false;
+    }
+
+    const now = Date.now();
+    if (session.expiresAt && now > session.expiresAt) {
+        return false;
+    }
+
+    try {
+        const response = await fetch(
+            `${supabaseUrl}/rest/v1/users?select=id,username,password&id=eq.${session.userId}`,
+            {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`
+                }
+            }
+        );
+        const data = await response.json();
+        if (!response.ok || data.length === 0) {
+            return false;
+        }
+
+        const user = data[0];
+        const serverPasswordDigest = await hashPassword(user.password);
+        if (serverPasswordDigest !== session.passwordDigest) {
+            return false;
+        }
+
+        session.username = user.username;
+        session.lastValidatedAt = now;
+        saveSession(session);
+        return true;
+    } catch (error) {
+        console.warn('Validation de session indisponible:', error);
+        return true;
+    }
+}
+
+function startSessionValidation() {
+    stopSessionValidation();
+    sessionValidationInterval = setInterval(async () => {
+        const session = loadSession();
+        const isValid = await validateSession(session);
+        if (!isValid) {
+            logout({ silent: true, reason: 'Session expirée ou révoquée.' });
+        }
+    }, SESSION_CHECK_INTERVAL_MS);
+}
+
+async function restoreSession() {
+    const session = loadSession();
+    if (!session) return false;
+
+    const isValid = await validateSession(session);
+    if (!isValid) {
+        clearSession();
+        return false;
+    }
+
+    currentUserId = session.userId;
+    users[session.userId] = { id: session.userId, username: session.username };
+
+    loginContainer.style.display = 'none';
+    connectedUser.style.display = 'block';
+    connectedUsername.textContent = session.username;
+
+    await requestNotificationPermission();
+    getMessages();
+    refreshMessages();
+    startSessionValidation();
+    return true;
+}
 
 // ============================================================
 // EMOJI PICKER
@@ -619,9 +743,21 @@ async function login() {
         connectedUsername.textContent  = user.username;
         
         users[user.id] = { id: user.id, username: user.username };
+
+        const session = {
+            userId: user.id,
+            username: user.username,
+            refreshToken: generateRefreshToken(),
+            passwordDigest: await hashPassword(password),
+            issuedAt: Date.now(),
+            expiresAt: Date.now() + SESSION_DURATION_MS,
+            lastValidatedAt: Date.now()
+        };
+        saveSession(session);
         
         getMessages();
         refreshMessages();
+        startSessionValidation();
 
     } catch (error) {
         console.error('Erreur lors de la connexion:', error);
@@ -629,7 +765,8 @@ async function login() {
     }
 }
 
-async function logout() {
+async function logout(options = {}) {
+    const { silent = false, reason = '' } = options;
     // Arrêter l'indicateur de frappe
     if (isTyping) {
         await updateTypingStatus(false);
@@ -646,12 +783,18 @@ async function logout() {
         clearInterval(refreshInterval);
         refreshInterval = null;
     }
+    stopSessionValidation();
+    clearSession();
     loginContainer.style.display = 'block';
     connectedUser.style.display  = 'none';
     chatMessages.innerHTML       = '';
     currentMessages = [];
     lastMessageCount = 0;
     typingIndicator.style.display = 'none';
+
+    if (!silent && reason) {
+        alert(reason);
+    }
 }
 
 // ============================================================
@@ -691,8 +834,11 @@ loginPassword.addEventListener('keydown', (e) => {
 });
 
 window.onload = () => {
-    getUsers().then(() => {
-        getMessages();
+    getUsers().then(async () => {
+        const restored = await restoreSession();
+        if (!restored) {
+            getMessages();
+        }
     });
 };
 
