@@ -50,10 +50,16 @@
         </div>
         <div class="chat-input">
             <input type="text" id="message-input" placeholder="Tapez votre message…">
+            <button id="emoji-button" class="emoji-button" title="Ajouter un emoji">😊</button>
             <button id="send-button">Envoyer</button>
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <!-- Emoji Picker Popup -->
+    <div class="emoji-picker-wrapper" id="emoji-picker-wrapper" style="display: none;">
+        <emoji-picker></emoji-picker>
+    </div>
+
+    <script type="module" src="app.js"></script>
 </body>
 </html>

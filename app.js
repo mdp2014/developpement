@@ -1,8 +1,13 @@
+// Import de la bibliothèque emoji-picker
+import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
+
 const supabaseUrl = 'https://unjdpzraozgcswfucezd.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVuamRwenJhb3pnY3N3ZnVjZXpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5NTMzOTQsImV4cCI6MjA4NTUyOTM5NH0.2fAnI9_Z-iay53GZ2UkXWxBnDULPC6Dm0sCK3XXIMwc';
 const chatMessages      = document.getElementById('chat-messages');
 const messageInput      = document.getElementById('message-input');
 const sendButton        = document.getElementById('send-button');
+const emojiButton       = document.getElementById('emoji-button');
+const emojiPickerWrapper = document.getElementById('emoji-picker-wrapper');
 const userSelect        = document.getElementById('user-select');
 const loginUsername     = document.getElementById('login-username');
 const loginPassword     = document.getElementById('login-password');
@@ -20,6 +25,88 @@ let typingTimeout = null;
 let isTyping = false;
 let currentMessages = [];
 let lastMessageCount = 0;
+let emojiPickerInstance = null;
+let emojiPickerOverlay = null;
+
+// ============================================================
+// EMOJI PICKER
+// ============================================================
+function initEmojiPicker() {
+    emojiPickerInstance = document.querySelector('emoji-picker');
+    
+    // Écouter les sélections d'emoji
+    emojiPickerInstance.addEventListener('emoji-click', (event) => {
+        const cursorPos = messageInput.selectionStart || messageInput.value.length;
+        const textBefore = messageInput.value.substring(0, cursorPos);
+        const textAfter = messageInput.value.substring(cursorPos);
+        
+        messageInput.value = textBefore + event.detail.unicode + textAfter;
+        
+        // Remettre le curseur après l'emoji inséré
+        const newCursorPos = cursorPos + event.detail.unicode.length;
+        messageInput.setSelectionRange(newCursorPos, newCursorPos);
+        
+        // Garder le focus sur l'input
+        messageInput.focus();
+    });
+}
+
+function toggleEmojiPicker() {
+    const isVisible = emojiPickerWrapper.style.display !== 'none';
+    
+    if (isVisible) {
+        closeEmojiPicker();
+    } else {
+        openEmojiPicker();
+    }
+}
+
+function openEmojiPicker() {
+    // Créer l'overlay si nécessaire
+    if (!emojiPickerOverlay) {
+        emojiPickerOverlay = document.createElement('div');
+        emojiPickerOverlay.className = 'emoji-picker-overlay';
+        emojiPickerOverlay.addEventListener('click', closeEmojiPicker);
+        document.body.appendChild(emojiPickerOverlay);
+    }
+    
+    emojiPickerWrapper.style.display = 'block';
+    emojiPickerWrapper.classList.remove('hiding');
+    emojiButton.classList.add('active');
+}
+
+function closeEmojiPicker() {
+    emojiPickerWrapper.classList.add('hiding');
+    emojiButton.classList.remove('active');
+    
+    setTimeout(() => {
+        emojiPickerWrapper.style.display = 'none';
+        emojiPickerWrapper.classList.remove('hiding');
+    }, 200);
+    
+    if (emojiPickerOverlay && emojiPickerOverlay.parentNode) {
+        emojiPickerOverlay.parentNode.removeChild(emojiPickerOverlay);
+        emojiPickerOverlay = null;
+    }
+}
+
+// Initialiser le picker une fois le DOM chargé
+document.addEventListener('DOMContentLoaded', initEmojiPicker);
+
+// Toggle emoji picker au clic
+emojiButton.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleEmojiPicker();
+});
+
+// Fermer le picker si on clique sur le bouton emoji alors qu'il est ouvert
+document.addEventListener('click', (e) => {
+    if (!emojiPickerWrapper.contains(e.target) && e.target !== emojiButton) {
+        if (emojiPickerWrapper.style.display !== 'none') {
+            closeEmojiPicker();
+        }
+    }
+});
 
 // ============================================================
 // NOTIFICATIONS PUSH
@@ -547,6 +634,9 @@ async function logout() {
     if (isTyping) {
         await updateTypingStatus(false);
     }
+    
+    // Fermer le emoji picker
+    closeEmojiPicker();
     
     currentUserId = null;
     isTyping = false;
