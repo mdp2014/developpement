@@ -1,6 +1,3 @@
-// Import de la bibliothèque emoji-picker
-import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
-
 const supabaseUrl = 'https://unjdpzraozgcswfucezd.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVuamRwenJhb3pnY3N3ZnVjZXpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5NTMzOTQsImV4cCI6MjA4NTUyOTM5NH0.2fAnI9_Z-iay53GZ2UkXWxBnDULPC6Dm0sCK3XXIMwc';
 
