@@ -1,155 +1,110 @@
 // Import de la bibliothèque emoji-picker
 import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
 
+// ============================================================
+// CONFIGURATION SUPABASE
+// ============================================================
 const supabaseUrl = 'https://unjdpzraozgcswfucezd.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVuamRwenJhb3pnY3N3ZnVjZXpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5NTMzOTQsImV4cCI6MjA4NTUyOTM5NH0.2fAnI9_Z-iay53GZ2UkXWxBnDULPC6Dm0sCK3XXIMwc';
-const chatMessages      = document.getElementById('chat-messages');
-const messageInput      = document.getElementById('message-input');
-const sendButton        = document.getElementById('send-button');
-const emojiButton       = document.getElementById('emoji-button');
-const emojiPickerWrapper = document.getElementById('emoji-picker-wrapper');
-const userSelect        = document.getElementById('user-select');
-const loginUsername     = document.getElementById('login-username');
-const loginPassword     = document.getElementById('login-password');
-const loginButton       = document.getElementById('login-button');
-const loginContainer    = document.getElementById('login-container');
-const connectedUser     = document.getElementById('connected-user');
-const connectedUsername = document.getElementById('connected-username');
-const logoutButton      = document.getElementById('logout-button');
-const typingIndicator   = document.getElementById('typing-indicator');
 
-let users = {};
-let currentUserId = null;
-let refreshInterval = null;
-let typingTimeout = null;
-let isTyping = false;
-let currentMessages = [];
+// ============================================================
+// RÉFÉRENCES DOM
+// ============================================================
+const chatMessages       = document.getElementById('chat-messages');
+const messageInput       = document.getElementById('message-input');
+const sendButton         = document.getElementById('send-button');
+const emojiButton        = document.getElementById('emoji-button');
+const emojiPickerWrapper = document.getElementById('emoji-picker-wrapper');
+const userSelect         = document.getElementById('user-select');
+const loginUsername      = document.getElementById('login-username');
+const loginPassword      = document.getElementById('login-password');
+const loginButton        = document.getElementById('login-button');
+const loginContainer     = document.getElementById('login-container');
+const connectedUser      = document.getElementById('connected-user');
+const connectedUsername  = document.getElementById('connected-username');
+const logoutButton       = document.getElementById('logout-button');
+const typingIndicator    = document.getElementById('typing-indicator');
+
+// ============================================================
+// ÉTAT GLOBAL
+// ============================================================
+let users            = {};
+let currentUserId    = null;
+let refreshInterval  = null;
+let typingTimeout    = null;
+let isTyping         = false;
+let currentMessages  = [];
 let lastMessageCount = 0;
 let emojiPickerInstance = null;
-let emojiPickerOverlay = null;
-let sessionValidationInterval = null;
+let emojiPickerOverlay  = null;
 
-const SESSION_STORAGE_KEY = 'persistent_session_v1';
+// ============================================================
+// SESSION PERSISTANTE (localStorage)
+// ============================================================
+const SESSION_KEY         = 'chat_session_v1';
 const SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
-const SESSION_CHECK_INTERVAL_MS = 1000 * 60 * 5; // 5 minutes
-
-function generateRefreshToken() {
-    const bytes = new Uint8Array(32);
-    window.crypto.getRandomValues(bytes);
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-async function hashPassword(password) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(password);
-    const digest = await window.crypto.subtle.digest('SHA-256', data);
-    return Array.from(new Uint8Array(digest))
-        .map((byte) => byte.toString(16).padStart(2, '0'))
-        .join('');
-}
 
 function loadSession() {
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return null;
     try {
-        return JSON.parse(raw);
-    } catch (error) {
-        console.warn('Session corrompue, suppression du stockage.', error);
-        localStorage.removeItem(SESSION_STORAGE_KEY);
+        const raw = localStorage.getItem(SESSION_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+        localStorage.removeItem(SESSION_KEY);
         return null;
     }
 }
 
-function saveSession(session) {
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+function saveSession(userId, username) {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+        userId,
+        username,
+        expiresAt: Date.now() + SESSION_DURATION_MS
+    }));
 }
 
 function clearSession() {
-    localStorage.removeItem(SESSION_STORAGE_KEY);
-}
-
-function stopSessionValidation() {
-    if (sessionValidationInterval) {
-        clearInterval(sessionValidationInterval);
-        sessionValidationInterval = null;
-    }
-}
-
-async function validateSession(session) {
-    if (!session || !session.userId || !session.refreshToken) {
-        return false;
-    }
-
-    const now = Date.now();
-    if (session.expiresAt && now > session.expiresAt) {
-        return false;
-    }
-
-    try {
-        const response = await fetch(
-            `${supabaseUrl}/rest/v1/users?select=id,username,password&id=eq.${session.userId}`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
-        );
-        const data = await response.json();
-        if (!response.ok || data.length === 0) {
-            return false;
-        }
-
-        const user = data[0];
-        const serverPasswordDigest = await hashPassword(user.password);
-        if (serverPasswordDigest !== session.passwordDigest) {
-            return false;
-        }
-
-        session.username = user.username;
-        session.lastValidatedAt = now;
-        saveSession(session);
-        return true;
-    } catch (error) {
-        console.warn('Validation de session indisponible:', error);
-        return true;
-    }
-}
-
-function startSessionValidation() {
-    stopSessionValidation();
-    sessionValidationInterval = setInterval(async () => {
-        const session = loadSession();
-        const isValid = await validateSession(session);
-        if (!isValid) {
-            logout({ silent: true, reason: 'Session expirée ou révoquée.' });
-        }
-    }, SESSION_CHECK_INTERVAL_MS);
+    localStorage.removeItem(SESSION_KEY);
 }
 
 async function restoreSession() {
     const session = loadSession();
     if (!session) return false;
-
-    const isValid = await validateSession(session);
-    if (!isValid) {
+    if (Date.now() > session.expiresAt) {
         clearSession();
         return false;
     }
 
-    currentUserId = session.userId;
-    users[session.userId] = { id: session.userId, username: session.username };
+    // Vérifier que l'utilisateur existe toujours en base
+    try {
+        const res = await fetch(
+            `${supabaseUrl}/rest/v1/users?select=id,username&id=eq.${session.userId}`,
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
+        );
+        const data = await res.json();
+        if (!res.ok || data.length === 0) { clearSession(); return false; }
 
-    loginContainer.style.display = 'none';
-    connectedUser.style.display = 'block';
-    connectedUsername.textContent = session.username;
+        currentUserId = session.userId;
+        users[session.userId] = { id: session.userId, username: session.username };
 
-    await requestNotificationPermission();
-    getMessages();
-    refreshMessages();
-    startSessionValidation();
-    return true;
+        loginContainer.style.display  = 'none';
+        connectedUser.style.display   = 'block';
+        connectedUsername.textContent = session.username;
+
+        await requestNotificationPermission();
+        getMessages();
+        refreshMessages();
+        return true;
+    } catch (e) {
+        // Si réseau indisponible, on accepte quand même la session locale
+        currentUserId = session.userId;
+        users[session.userId] = { id: session.userId, username: session.username };
+        loginContainer.style.display  = 'none';
+        connectedUser.style.display   = 'block';
+        connectedUsername.textContent = session.username;
+        getMessages();
+        refreshMessages();
+        return true;
+    }
 }
 
 // ============================================================
@@ -157,43 +112,26 @@ async function restoreSession() {
 // ============================================================
 function initEmojiPicker() {
     emojiPickerInstance = document.querySelector('emoji-picker');
-    
-    // Écouter les sélections d'emoji
+    if (!emojiPickerInstance) return;
+
     emojiPickerInstance.addEventListener('emoji-click', (event) => {
-        const cursorPos = messageInput.selectionStart || messageInput.value.length;
+        const cursorPos  = messageInput.selectionStart ?? messageInput.value.length;
         const textBefore = messageInput.value.substring(0, cursorPos);
-        const textAfter = messageInput.value.substring(cursorPos);
-        
+        const textAfter  = messageInput.value.substring(cursorPos);
         messageInput.value = textBefore + event.detail.unicode + textAfter;
-        
-        // Remettre le curseur après l'emoji inséré
-        const newCursorPos = cursorPos + event.detail.unicode.length;
-        messageInput.setSelectionRange(newCursorPos, newCursorPos);
-        
-        // Garder le focus sur l'input
+        const newPos = cursorPos + event.detail.unicode.length;
+        messageInput.setSelectionRange(newPos, newPos);
         messageInput.focus();
     });
 }
 
-function toggleEmojiPicker() {
-    const isVisible = emojiPickerWrapper.style.display !== 'none';
-    
-    if (isVisible) {
-        closeEmojiPicker();
-    } else {
-        openEmojiPicker();
-    }
-}
-
 function openEmojiPicker() {
-    // Créer l'overlay si nécessaire
     if (!emojiPickerOverlay) {
         emojiPickerOverlay = document.createElement('div');
         emojiPickerOverlay.className = 'emoji-picker-overlay';
         emojiPickerOverlay.addEventListener('click', closeEmojiPicker);
         document.body.appendChild(emojiPickerOverlay);
     }
-    
     emojiPickerWrapper.style.display = 'block';
     emojiPickerWrapper.classList.remove('hiding');
     emojiButton.classList.add('active');
@@ -202,33 +140,30 @@ function openEmojiPicker() {
 function closeEmojiPicker() {
     emojiPickerWrapper.classList.add('hiding');
     emojiButton.classList.remove('active');
-    
     setTimeout(() => {
         emojiPickerWrapper.style.display = 'none';
         emojiPickerWrapper.classList.remove('hiding');
     }, 200);
-    
-    if (emojiPickerOverlay && emojiPickerOverlay.parentNode) {
+    if (emojiPickerOverlay?.parentNode) {
         emojiPickerOverlay.parentNode.removeChild(emojiPickerOverlay);
         emojiPickerOverlay = null;
     }
 }
 
-// Initialiser le picker une fois le DOM chargé
+function toggleEmojiPicker() {
+    emojiPickerWrapper.style.display !== 'none' ? closeEmojiPicker() : openEmojiPicker();
+}
+
 document.addEventListener('DOMContentLoaded', initEmojiPicker);
 
-// Toggle emoji picker au clic
 emojiButton.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleEmojiPicker();
 });
 
-// Fermer le picker si on clique sur le bouton emoji alors qu'il est ouvert
 document.addEventListener('click', (e) => {
     if (!emojiPickerWrapper.contains(e.target) && e.target !== emojiButton) {
-        if (emojiPickerWrapper.style.display !== 'none') {
-            closeEmojiPicker();
-        }
+        if (emojiPickerWrapper.style.display !== 'none') closeEmojiPicker();
     }
 });
 
@@ -236,41 +171,24 @@ document.addEventListener('click', (e) => {
 // NOTIFICATIONS PUSH
 // ============================================================
 async function requestNotificationPermission() {
-    if (!('Notification' in window)) {
-        console.log('Ce navigateur ne supporte pas les notifications');
-        return false;
-    }
-
-    if (Notification.permission === 'granted') {
-        return true;
-    }
-
+    if (!('Notification' in window)) return false;
+    if (Notification.permission === 'granted') return true;
     if (Notification.permission !== 'denied') {
-        const permission = await Notification.requestPermission();
-        return permission === 'granted';
+        const perm = await Notification.requestPermission();
+        return perm === 'granted';
     }
-
     return false;
 }
 
-function showNotification(title, body, icon = '💬') {
+function showNotification(title, body) {
     if (Notification.permission === 'granted' && document.hidden) {
-        const notification = new Notification(title, {
-            body: body,
-            icon: icon,
-            badge: icon,
-            tag: 'message-notification',
-            requireInteraction: false,
-            silent: false
+        const n = new Notification(title, {
+            body,
+            tag: 'chat-notif',
+            requireInteraction: false
         });
-
-        notification.onclick = () => {
-            window.focus();
-            notification.close();
-        };
-
-        // Auto-fermer après 5 secondes
-        setTimeout(() => notification.close(), 5000);
+        n.onclick = () => { window.focus(); n.close(); };
+        setTimeout(() => n.close(), 5000);
     }
 }
 
@@ -278,26 +196,19 @@ function showNotification(title, body, icon = '💬') {
 // GESTION DES UTILISATEURS
 // ============================================================
 async function getUsers() {
-    const response = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, {
-        method: 'GET',
-        headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-        }
+    const res = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
     });
-    const data = await response.json();
-    if (!response.ok) {
-        console.error('Error fetching users:', data);
-    } else {
-        userSelect.innerHTML = '';
-        data.forEach(user => {
-            const option = document.createElement('option');
-            option.value    = user.id;
-            option.textContent = user.username;
-            userSelect.appendChild(option);
-            users[user.id] = user;
-        });
-    }
+    const data = await res.json();
+    if (!res.ok) { console.error('Erreur chargement utilisateurs:', data); return; }
+    userSelect.innerHTML = '';
+    data.forEach(user => {
+        const opt = document.createElement('option');
+        opt.value       = user.id;
+        opt.textContent = user.username;
+        userSelect.appendChild(opt);
+        users[user.id]  = user;
+    });
 }
 
 // ============================================================
@@ -305,24 +216,22 @@ async function getUsers() {
 // ============================================================
 function getGeolocation() {
     return new Promise((resolve, reject) => {
-        if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(
-                position => resolve({
-                    latitude:  position.coords.latitude,
-                    longitude: position.coords.longitude
-                }),
-                error => reject(error)
-            );
-        } else {
-            reject(new Error('Geolocation is not supported by this browser.'));
-        }
+        if (!navigator.geolocation) return reject(new Error('Non supporté'));
+        navigator.geolocation.getCurrentPosition(
+            pos => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+            err => reject(err)
+        );
     });
 }
 
-async function getCityFromCoordinates(latitude, longitude) {
-    const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
-    const data = await response.json();
-    return data.address.city || data.address.town || data.address.village || 'Unknown';
+async function getCityFromCoordinates(lat, lon) {
+    try {
+        const res  = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+        const data = await res.json();
+        return data.address?.city || data.address?.town || data.address?.village || null;
+    } catch (e) {
+        return null;
+    }
 }
 
 // ============================================================
@@ -330,23 +239,14 @@ async function getCityFromCoordinates(latitude, longitude) {
 // ============================================================
 async function updateTypingStatus(isTypingNow) {
     if (!currentUserId || !userSelect.value) return;
-
     try {
-        // Vérifier si un statut existe déjà
-        const checkResponse = await fetch(
+        const checkRes = await fetch(
             `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
         );
-        const existingStatus = await checkResponse.json();
+        const existing = await checkRes.json();
 
-        if (existingStatus.length > 0) {
-            // Mettre à jour le statut existant
+        if (existing.length > 0) {
             await fetch(
                 `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
                 {
@@ -356,14 +256,10 @@ async function updateTypingStatus(isTypingNow) {
                         'apikey': supabaseKey,
                         'Authorization': `Bearer ${supabaseKey}`
                     },
-                    body: JSON.stringify({
-                        is_typing: isTypingNow,
-                        updated_at: new Date().toISOString()
-                    })
+                    body: JSON.stringify({ is_typing: isTypingNow, updated_at: new Date().toISOString() })
                 }
             );
         } else {
-            // Créer un nouveau statut
             await fetch(`${supabaseUrl}/rest/v1/typing_status`, {
                 method: 'POST',
                 headers: {
@@ -373,15 +269,15 @@ async function updateTypingStatus(isTypingNow) {
                     'Prefer': 'return=minimal'
                 },
                 body: JSON.stringify({
-                    user_id: currentUserId,
+                    user_id:      currentUserId,
                     recipient_id: userSelect.value,
-                    is_typing: isTypingNow,
-                    updated_at: new Date().toISOString()
+                    is_typing:    isTypingNow,
+                    updated_at:   new Date().toISOString()
                 })
             });
         }
-    } catch (error) {
-        console.error('Erreur lors de la mise à jour du statut de frappe:', error);
+    } catch (e) {
+        console.error('Erreur statut de frappe:', e);
     }
 }
 
@@ -390,188 +286,248 @@ async function checkTypingStatus() {
         typingIndicator.style.display = 'none';
         return;
     }
-
     try {
-        const response = await fetch(
+        const res  = await fetch(
             `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${userSelect.value}&recipient_id=eq.${currentUserId}&select=*`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
         );
-        const data = await response.json();
+        const data = await res.json();
 
         if (data.length > 0) {
-            const status = data[0];
-            const updatedAt = new Date(status.updated_at);
-            const now = new Date();
-            const secondsSinceUpdate = (now - updatedAt) / 1000;
-
-            // Afficher l'indicateur seulement si la mise à jour est récente (moins de 3 secondes)
-            if (status.is_typing && secondsSinceUpdate < 3) {
-                const recipientName = users[userSelect.value]?.username || 'L\'utilisateur';
-                // ✅ Points animés via innerHTML
-                typingIndicator.innerHTML = `${recipientName} est en train d'écrire\u00a0<span class="typing-dots"><span></span><span></span><span></span></span>`;
+            const status  = data[0];
+            const seconds = (Date.now() - new Date(status.updated_at)) / 1000;
+            if (status.is_typing && seconds < 3) {
+                const name = users[userSelect.value]?.username || 'Utilisateur';
+                // ✅ Points animés
+                typingIndicator.innerHTML = `${name} est en train d'écrire\u00a0<span class="typing-dots"><span></span><span></span><span></span></span>`;
                 typingIndicator.style.display = 'flex';
-            } else {
-                typingIndicator.style.display = 'none';
+                return;
             }
-        } else {
-            typingIndicator.style.display = 'none';
         }
-    } catch (error) {
-        console.error('Erreur lors de la vérification du statut de frappe:', error);
+        typingIndicator.style.display = 'none';
+    } catch (e) {
+        console.error('Erreur vérification frappe:', e);
     }
 }
 
-// Gérer la saisie dans le champ de message
+// Écoute la saisie pour mettre à jour le statut de frappe
 messageInput.addEventListener('input', () => {
     if (!isTyping) {
         isTyping = true;
         updateTypingStatus(true);
     }
-
-    // Réinitialiser le timeout
     clearTimeout(typingTimeout);
     typingTimeout = setTimeout(() => {
         isTyping = false;
         updateTypingStatus(false);
-    }, 2000); // Arrêter après 2 secondes d'inactivité
+    }, 2000);
 });
 
 // ============================================================
 // ENVOI DE MESSAGES
 // ============================================================
 async function sendMessage(userId, content) {
-    console.log('Sending message:', { userId, content });
     let latitude = null, longitude = null, city = null;
-
     try {
-        const geolocation = await getGeolocation();
-        latitude  = geolocation.latitude;
-        longitude = geolocation.longitude;
+        const geo = await getGeolocation();
+        latitude  = geo.latitude;
+        longitude = geo.longitude;
         city      = await getCityFromCoordinates(latitude, longitude);
-    } catch (error) {
-        console.warn('Géolocalisation indisponible, message envoyé sans position :', error);
+    } catch (e) {
+        // géolocalisation refusée ou indisponible — pas grave
     }
 
-    // Arrêter l'indicateur de frappe
+    // Stopper l'indicateur de frappe
     isTyping = false;
     clearTimeout(typingTimeout);
     await updateTypingStatus(false);
 
-    try {
-        const response = await fetch(`${supabaseUrl}/rest/v1/messages`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`
-            },
-            body: JSON.stringify({
-                id_sent:     userId,
-                content:     content,
-                created_at:  new Date().toISOString(),
-                id_received: userSelect.value,
-                read_at:     null,
-                latitude:    latitude,
-                longitude:   longitude,
-                city:        city
-            })
-        });
-        const data = await response.json();
-        if (!response.ok) {
-            console.error('Error inserting message:', data);
-        } else {
-            console.log('Message inserted:', data);
-            getMessages();
-            return true;
-        }
-    } catch (error) {
-        console.error('Error sending message:', error);
+    const res = await fetch(`${supabaseUrl}/rest/v1/messages`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`
+        },
+        body: JSON.stringify({
+            id_sent:     userId,
+            content,
+            created_at:  new Date().toISOString(),
+            id_received: userSelect.value,
+            read_at:     null,
+            latitude,
+            longitude,
+            city
+        })
+    });
+    if (!res.ok) {
+        console.error('Erreur envoi message:', await res.json());
+        return false;
     }
-    return false;
+    getMessages();
+    return true;
 }
 
 // ============================================================
-// ACCUSÉS DE RÉCEPTION
+// ACCUSÉS DE RÉCEPTION — marquer comme lus
 // ============================================================
 async function markMessagesAsRead() {
     if (!currentUserId || !userSelect.value) return;
-
-    try {
-        // Marquer comme lus tous les messages reçus de l'utilisateur sélectionné qui ne sont pas encore lus
-        const response = await fetch(
-            `${supabaseUrl}/rest/v1/messages?id_sent=eq.${userSelect.value}&id_received=eq.${currentUserId}&read_at=is.null`,
-            {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`,
-                    'Prefer': 'return=minimal'
-                },
-                body: JSON.stringify({
-                    read_at: new Date().toISOString()
-                })
-            }
-        );
-
-        if (response.ok) {
-            console.log('Messages marqués comme lus');
+    await fetch(
+        `${supabaseUrl}/rest/v1/messages?id_sent=eq.${userSelect.value}&id_received=eq.${currentUserId}&read_at=is.null`,
+        {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`,
+                'Prefer': 'return=minimal'
+            },
+            body: JSON.stringify({ read_at: new Date().toISOString() })
         }
-    } catch (error) {
-        console.error('Erreur lors du marquage des messages comme lus:', error);
-    }
+    ).catch(e => console.error('Erreur marquage lu:', e));
 }
 
 // ============================================================
-// RÉCUPÉRATION DES MESSAGES
+// SUPPRESSION D'UN MESSAGE
 // ============================================================
 async function deleteMessage(messageId) {
-    const response = await fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
+    const res = await fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
         method: 'DELETE',
-        headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-        }
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
     });
-    if (!response.ok) {
-        console.error('Error deleting message:', await response.json());
-    } else {
-        console.log('Message deleted:', messageId);
-        getMessages();
-    }
+    if (!res.ok) { console.error('Erreur suppression:', await res.json()); return; }
+    getMessages();
 }
 
+// ============================================================
+// RÉCUPÉRATION ET AFFICHAGE DES MESSAGES
+// ============================================================
 async function getMessages() {
     if (!currentUserId || !userSelect.value) {
         chatMessages.innerHTML = '';
-        currentMessages = [];
+        currentMessages  = [];
         lastMessageCount = 0;
         return;
     }
 
-    console.log('Fetching messages...');
-    const query = `${supabaseUrl}/rest/v1/messages?select=*&order=created_at.asc&or=(and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId}))`;
-    const response = await fetch(query, {
-        method: 'GET',
-        headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-        }
+    const query = `${supabaseUrl}/rest/v1/messages?select=*&order=created_at.asc` +
+        `&or=(and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),` +
+        `and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId}))`;
+
+    const res  = await fetch(query, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
     });
-    const data = await response.json();
-    if (!response.ok) {
-        console.error('Error fetching messages:', data);
-    } else {
-        console.log('Messages fetched:', data);
-        
-        // Détecter les nouveaux messages pour les notifications
-        if (data.length > lastMessageCount && lastMessageCount > 0) {
-            const newMessages = data.slice(lastMessageCount);
-            newMessages.forEach(msg => {
-                if (msg.id_sent === userSelect.value 
+    const data = await res.json();
+    if (!res.ok) { console.error('Erreur messages:', data); return; }
+
+    // Notifications pour nouveaux messages reçus
+    if (data.length > lastMessageCount && lastMessageCount > 0) {
+        data.slice(lastMessageCount).forEach(msg => {
+            if (msg.id_sent === userSelect.value && msg.id_received === currentUserId) {
+                const senderName = users[msg.id_sent]?.username || 'Quelqu\'un';
+                showNotification(
+                    `Nouveau message de ${senderName}`,
+                    msg.content.substring(0, 60) + (msg.content.length > 60 ? '…' : '')
+                );
+            }
+        });
+    }
+    lastMessageCount = data.length;
+
+    // Marquer les messages reçus comme lus
+    await markMessagesAsRead();
+
+    // Ne redessiner que si quelque chose a changé
+    const hasChanges =
+        data.length !== currentMessages.length ||
+        data.some((msg, i) => msg.id !== currentMessages[i]?.id || msg.read_at !== currentMessages[i]?.read_at);
+
+    if (!hasChanges) return;
+
+    const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
+    currentMessages   = data;
+    chatMessages.innerHTML = '';
+    let lastDate = null;
+
+    data.forEach(message => {
+        const dateObj     = new Date(message.created_at);
+        const messageDate = dateObj.toLocaleDateString();
+        const messageTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const senderName  = users[message.id_sent]?.username || '?';
+
+        // Séparateur de date
+        if (messageDate !== lastDate) {
+            const dateEl = document.createElement('div');
+            dateEl.className   = 'date';
+            dateEl.textContent = messageDate;
+            chatMessages.appendChild(dateEl);
+            lastDate = messageDate;
+        }
+
+        // Bulle de message
+        const msgEl = document.createElement('div');
+        msgEl.classList.add('message');
+
+        // Nom de l'expéditeur
+        const senderEl = document.createElement('span');
+        senderEl.className   = 'msg-sender';
+        senderEl.textContent = senderName;
+
+        // Texte
+        const textNode = document.createTextNode(message.content);
+
+        // Méta : ville · heure · statut lecture
+        const metaEl = document.createElement('span');
+        metaEl.classList.add('msg-meta');
+        let metaText = message.city ? `📍 ${message.city} · ${messageTime}` : messageTime;
+
+        if (message.id_sent === currentUserId) {
+            if (message.read_at) {
+                metaText += ' · ✓✓ Lu';
+                metaEl.classList.add('read'); // ✅ noir + bold via CSS
+            } else {
+                metaText += ' · ✓ Envoyé';
+                metaEl.classList.add('sent-status'); // ✅ classe sans conflit
+            }
+        }
+        metaEl.textContent = metaText;
+
+        msgEl.appendChild(senderEl);
+        msgEl.appendChild(textNode);
+        msgEl.appendChild(metaEl);
+
+        if (message.id_sent === currentUserId) {
+            msgEl.classList.add('sent');
+            const delBtn = document.createElement('span');
+            delBtn.textContent = '✖';
+            delBtn.className   = 'delete-button';
+            delBtn.addEventListener('click', () => deleteMessage(message.id));
+            msgEl.appendChild(delBtn);
+        } else {
+            msgEl.classList.add('received');
+        }
+
+        chatMessages.appendChild(msgEl);
+    });
+
+    if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// ============================================================
+// RAFRAÎCHISSEMENT AUTOMATIQUE (1 seconde)
+// ============================================================
+function refreshMessages() {
+    if (refreshInterval) clearInterval(refreshInterval);
+    refreshInterval = setInterval(() => {
+        getMessages();
+        checkTypingStatus();
+    }, 1000);
+}
+
+// ============================================================
+// CONNEXION
+// ============================================================
+async function login() {
+    const username = loginUsername.value.trim();
+    const password 
