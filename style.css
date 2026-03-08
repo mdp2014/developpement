@@ -786,7 +786,7 @@ body::after {
     position: relative;
     overflow: hidden;
 }
-.chat-input button#send-button::after {
+.chat-input button#send-button::after 
     content: '';
     position: absolute;
     inset: 0;
