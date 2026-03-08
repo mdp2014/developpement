@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Messagerie Instantanée</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Subtle grid texture layer -->
+    <div class="page-grid-overlay"></div>
+
+    <div class="login-container" id="login-container">
+        <h2>Connexion</h2>
+        <p class="subtitle">Bienvenue, connectez-vous pour continuer</p>
+        <input type="text"     id="login-username" placeholder="Nom d'utilisateur">
+        <input type="password" id="login-password" placeholder="Mot de passe">
+        <button id="login-button">Se connecter</button>
+        <p class="inscription-link"><a href="inscription.html">Pas de compte ? → S'inscrire</a></p>
+    </div>
+
+    <div class="connected-user" id="connected-user" style="display: none;">
+        <p>
+            <span class="status-dot"></span>
+            Connecté : <span id="connected-username"></span>
+            <span id="network-indicator" class="network-indicator" title="Qualité réseau"></span>
+        </p>
+        <button id="logout-button">Déconnexion</button>
+    </div>
+
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>💬 <span>Messagerie</span> Instantanée</h1>
+            <button id="summary-button" class="summary-btn" title="Générer un résumé">📝 Résumé</button>
+        </div>
+        <div class="user-selection">
+            <label for="user-select">Vers</label>
+            <select id="user-select">
+                <!-- Les options seront ajoutées ici par JavaScript -->
+            </select>
+        </div>
+        <!-- Indicateur "en train d'écrire" -->
+        <div class="typing-indicator" id="typing-indicator" style="display: none;"></div>
+        
+        <!-- Réponses rapides suggérées -->
+        <div class="quick-replies-container" id="quick-replies" style="display: none;"></div>
+        
+        <div class="chat-messages" id="chat-messages">
+            <!-- Les messages seront affichés ici -->
+        </div>
+        
+        <div class="chat-input">
+            <input type="text" id="message-input" placeholder="Tapez votre message…">
+            <button id="emoji-button" class="icon-button" title="Insérer un emoji">😊</button>
+            <button id="send-button">Envoyer</button>
+        </div>
+        
+        <div id="upload-progress" class="upload-progress" style="display: none;"></div>
+    </div>
+
+    <!-- Emoji Picker Popup -->
+    <div class="emoji-picker-wrapper" id="emoji-picker-wrapper" style="display: none;">
+        <emoji-picker></emoji-picker>
+    </div>
+
+    <!-- Summary Modal -->
+    <div id="summary-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close-modal" id="close-summary">&times;</span>
+            <div id="summary-content">
+                <div class="loading">Chargement...</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
