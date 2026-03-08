@@ -74,7 +74,6 @@ async function restoreSession() {
         return false;
     }
 
-    // Vérifier que l'utilisateur existe toujours en base
     try {
         const res = await fetch(
             `${supabaseUrl}/rest/v1/users?select=id,username&id=eq.${session.userId}`,
@@ -91,16 +90,17 @@ async function restoreSession() {
         connectedUsername.textContent = session.username;
 
         await requestNotificationPermission();
+        await getUsers();
         getMessages();
         refreshMessages();
         return true;
     } catch (e) {
-        // Si réseau indisponible, on accepte quand même la session locale
         currentUserId = session.userId;
         users[session.userId] = { id: session.userId, username: session.username };
         loginContainer.style.display  = 'none';
         connectedUser.style.display   = 'block';
         connectedUsername.textContent = session.username;
+        await getUsers();
         getMessages();
         refreshMessages();
         return true;
@@ -203,6 +203,7 @@ async function getUsers() {
     if (!res.ok) { console.error('Erreur chargement utilisateurs:', data); return; }
     userSelect.innerHTML = '';
     data.forEach(user => {
+        if (user.id === currentUserId) return; // ne pas s'afficher soi-même
         const opt = document.createElement('option');
         opt.value       = user.id;
         opt.textContent = user.username;
@@ -298,7 +299,6 @@ async function checkTypingStatus() {
             const seconds = (Date.now() - new Date(status.updated_at)) / 1000;
             if (status.is_typing && seconds < 3) {
                 const name = users[userSelect.value]?.username || 'Utilisateur';
-                // ✅ Points animés
                 typingIndicator.innerHTML = `${name} est en train d'écrire\u00a0<span class="typing-dots"><span></span><span></span><span></span></span>`;
                 typingIndicator.style.display = 'flex';
                 return;
@@ -310,7 +310,6 @@ async function checkTypingStatus() {
     }
 }
 
-// Écoute la saisie pour mettre à jour le statut de frappe
 messageInput.addEventListener('input', () => {
     if (!isTyping) {
         isTyping = true;
@@ -334,10 +333,9 @@ async function sendMessage(userId, content) {
         longitude = geo.longitude;
         city      = await getCityFromCoordinates(latitude, longitude);
     } catch (e) {
-        // géolocalisation refusée ou indisponible — pas grave
+        // géolocalisation refusée ou indisponible
     }
 
-    // Stopper l'indicateur de frappe
     isTyping = false;
     clearTimeout(typingTimeout);
     await updateTypingStatus(false);
@@ -421,7 +419,6 @@ async function getMessages() {
     const data = await res.json();
     if (!res.ok) { console.error('Erreur messages:', data); return; }
 
-    // Notifications pour nouveaux messages reçus
     if (data.length > lastMessageCount && lastMessageCount > 0) {
         data.slice(lastMessageCount).forEach(msg => {
             if (msg.id_sent === userSelect.value && msg.id_received === currentUserId) {
@@ -435,10 +432,8 @@ async function getMessages() {
     }
     lastMessageCount = data.length;
 
-    // Marquer les messages reçus comme lus
     await markMessagesAsRead();
 
-    // Ne redessiner que si quelque chose a changé
     const hasChanges =
         data.length !== currentMessages.length ||
         data.some((msg, i) => msg.id !== currentMessages[i]?.id || msg.read_at !== currentMessages[i]?.read_at);
@@ -456,7 +451,6 @@ async function getMessages() {
         const messageTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const senderName  = users[message.id_sent]?.username || '?';
 
-        // Séparateur de date
         if (messageDate !== lastDate) {
             const dateEl = document.createElement('div');
             dateEl.className   = 'date';
@@ -465,19 +459,15 @@ async function getMessages() {
             lastDate = messageDate;
         }
 
-        // Bulle de message
         const msgEl = document.createElement('div');
         msgEl.classList.add('message');
 
-        // Nom de l'expéditeur
         const senderEl = document.createElement('span');
         senderEl.className   = 'msg-sender';
         senderEl.textContent = senderName;
 
-        // Texte
         const textNode = document.createTextNode(message.content);
 
-        // Méta : ville · heure · statut lecture
         const metaEl = document.createElement('span');
         metaEl.classList.add('msg-meta');
         let metaText = message.city ? `📍 ${message.city} · ${messageTime}` : messageTime;
@@ -485,10 +475,10 @@ async function getMessages() {
         if (message.id_sent === currentUserId) {
             if (message.read_at) {
                 metaText += ' · ✓✓ Lu';
-                metaEl.classList.add('read'); // ✅ noir + bold via CSS
+                metaEl.classList.add('read');
             } else {
                 metaText += ' · ✓ Envoyé';
-                metaEl.classList.add('sent-status'); // ✅ classe sans conflit
+                metaEl.classList.add('sent-status');
             }
         }
         metaEl.textContent = metaText;
@@ -530,4 +520,268 @@ function refreshMessages() {
 // ============================================================
 async function login() {
     const username = loginUsername.value.trim();
-    const password 
+    const password = loginPassword.value;
+
+    if (!username || !password) {
+        alert('Veuillez remplir tous les champs.');
+        return;
+    }
+
+    loginButton.disabled    = true;
+    loginButton.textContent = 'Connexion…';
+
+    try {
+        const res = await fetch(
+            `${supabaseUrl}/rest/v1/users?select=id,username,password&username=eq.${encodeURIComponent(username)}`,
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
+        );
+        const data = await res.json();
+
+        if (!res.ok || data.length === 0) {
+            alert('Nom d\'utilisateur introuvable.');
+            loginButton.disabled    = false;
+            loginButton.textContent = 'Se connecter';
+            return;
+        }
+
+        const user = data[0];
+        if (user.password !== password) {
+            alert('Mot de passe incorrect.');
+            loginButton.disabled    = false;
+            loginButton.textContent = 'Se connecter';
+            return;
+        }
+
+        currentUserId = user.id;
+        users[user.id] = { id: user.id, username: user.username };
+
+        saveSession(user.id, user.username);
+
+        loginContainer.style.display  = 'none';
+        connectedUser.style.display   = 'block';
+        connectedUsername.textContent = user.username;
+        loginPassword.value           = '';
+
+        await requestNotificationPermission();
+        await getUsers();
+        getMessages();
+        refreshMessages();
+    } catch (e) {
+        console.error('Erreur connexion:', e);
+        alert('Erreur de connexion. Vérifiez votre réseau.');
+        loginButton.disabled    = false;
+        loginButton.textContent = 'Se connecter';
+    }
+}
+
+// ============================================================
+// DÉCONNEXION
+// ============================================================
+async function logout() {
+    // Stopper la frappe en cours
+    if (isTyping) {
+        isTyping = false;
+        clearTimeout(typingTimeout);
+        await updateTypingStatus(false);
+    }
+
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+    }
+
+    clearSession();
+    currentUserId    = null;
+    currentMessages  = [];
+    lastMessageCount = 0;
+    users            = {};
+
+    chatMessages.innerHTML    = '';
+    userSelect.innerHTML      = '';
+    typingIndicator.style.display = 'none';
+
+    connectedUser.style.display  = 'none';
+    loginContainer.style.display = 'block';
+    loginButton.disabled         = false;
+    loginButton.textContent      = 'Se connecter';
+}
+
+// ============================================================
+// RÉSUMÉ DE CONVERSATION (Claude API)
+// ============================================================
+async function generateConversationSummary() {
+    if (currentMessages.length < 5) {
+        return '<p>La conversation est trop courte pour générer un résumé (minimum 5 messages).</p>';
+    }
+
+    const conversationText = currentMessages.map(msg => {
+        const sender = users[msg.id_sent]?.username || '?';
+        const time   = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return `[${time}] ${sender}: ${msg.content}`;
+    }).join('\n');
+
+    try {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 1000,
+                messages: [{
+                    role: 'user',
+                    content: `Voici une conversation entre plusieurs utilisateurs. Génère un résumé concis en français avec :
+- Le sujet principal de la conversation
+- Les points clés discutés
+- Les éventuelles décisions ou actions à retenir
+
+Conversation :
+${conversationText}
+
+Réponds en HTML simple (utilise <h3>, <p>, <ul>, <li>). Sois concis.`
+                }]
+            })
+        });
+
+        const data = await response.json();
+        if (data.content && data.content[0]?.text) {
+            return data.content[0].text;
+        }
+        return '<p>Impossible de générer le résumé.</p>';
+    } catch (e) {
+        console.error('Erreur résumé:', e);
+        return '<p>Erreur lors de la génération du résumé.</p>';
+    }
+}
+
+// ============================================================
+// RÉPONSES RAPIDES
+// ============================================================
+function generateQuickReplies(lastMessage) {
+    if (!lastMessage) return [];
+    const content = lastMessage.content.toLowerCase();
+    const replies = [];
+
+    if (content.includes('bonjour') || content.includes('salut') || content.includes('hello')) {
+        replies.push('Bonjour ! 👋', 'Salut !', 'Hey !');
+    } else if (content.includes('merci') || content.includes('thanks')) {
+        replies.push('De rien !', 'Avec plaisir !', 'C\'est normal 😊');
+    } else if (content.includes('?')) {
+        replies.push('Oui', 'Non', 'Je ne sais pas', 'Peut-être');
+    } else if (content.includes('comment') && (content.includes('va') || content.includes('ça'))) {
+        replies.push('Très bien, merci !', 'Ça va bien 😊', 'Pas mal !');
+    } else if (content.includes('ok') || content.includes('d\'accord')) {
+        replies.push('Parfait !', '👍', 'Super !');
+    }
+
+    return replies.slice(0, 3);
+}
+
+function updateQuickReplies() {
+    const quickReplies = document.getElementById('quick-replies');
+    if (!quickReplies) return;
+
+    const lastReceived = [...currentMessages].reverse()
+        .find(msg => msg.id_sent === userSelect.value);
+
+    if (!lastReceived) {
+        quickReplies.style.display = 'none';
+        return;
+    }
+
+    const replies = generateQuickReplies(lastReceived);
+    if (replies.length === 0) {
+        quickReplies.style.display = 'none';
+        return;
+    }
+
+    quickReplies.innerHTML = '';
+    replies.forEach(reply => {
+        const btn = document.createElement('button');
+        btn.className   = 'quick-reply-btn';
+        btn.textContent = reply;
+        btn.addEventListener('click', () => {
+            messageInput.value = reply;
+            sendButton.click();
+            quickReplies.style.display = 'none';
+        });
+        quickReplies.appendChild(btn);
+    });
+    quickReplies.style.display = 'flex';
+}
+
+// ============================================================
+// ÉVÉNEMENTS PRINCIPAUX
+// ============================================================
+loginButton.addEventListener('click', login);
+
+loginPassword.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') login();
+});
+
+loginUsername.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loginPassword.focus();
+});
+
+logoutButton.addEventListener('click', logout);
+
+sendButton.addEventListener('click', async () => {
+    const content = messageInput.value.trim();
+    if (!content || !currentUserId) return;
+    messageInput.value = '';
+    await sendMessage(currentUserId, content);
+    updateQuickReplies();
+});
+
+messageInput.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const content = messageInput.value.trim();
+        if (!content || !currentUserId) return;
+        messageInput.value = '';
+        await sendMessage(currentUserId, content);
+        updateQuickReplies();
+    }
+});
+
+userSelect.addEventListener('change', () => {
+    currentMessages  = [];
+    lastMessageCount = 0;
+    getMessages();
+});
+
+// Bouton résumé
+const summaryButton = document.getElementById('summary-button');
+const summaryModal  = document.getElementById('summary-modal');
+const summaryContent = document.getElementById('summary-content');
+const closeSummary  = document.getElementById('close-summary');
+
+if (summaryButton) {
+    summaryButton.addEventListener('click', async () => {
+        summaryModal.style.display = 'flex';
+        summaryContent.innerHTML   = '<div class="loading">Génération du résumé…</div>';
+        summaryContent.innerHTML   = await generateConversationSummary();
+    });
+}
+
+if (closeSummary) {
+    closeSummary.addEventListener('click', () => {
+        summaryModal.style.display = 'none';
+    });
+}
+
+if (summaryModal) {
+    summaryModal.addEventListener('click', (e) => {
+        if (e.target === summaryModal) summaryModal.style.display = 'none';
+    });
+}
+
+// ============================================================
+// INITIALISATION
+// ============================================================
+(async () => {
+    const restored = await restoreSession();
+    if (!restored) {
+        loginContainer.style.display = 'block';
+        connectedUser.style.display  = 'none';
+    }
+})();
