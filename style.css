@@ -589,7 +589,7 @@ body::after {
 }
 
 .chat-messages .message .msg-meta.read {
-    color: var(--accent);
+    color: #000;
     opacity: 0.8;
 }
 
