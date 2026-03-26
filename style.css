@@ -221,6 +221,21 @@ body::after {
     text-shadow: 0 0 10px var(--accent-glow);
 }
 
+.suggestions-link {
+    margin-top: 8px;
+}
+.suggestions-link a {
+    color: var(--accent2);
+    text-decoration: none;
+    font-size: 0.8rem;
+    font-weight: 500;
+    transition: color var(--transition), text-shadow var(--transition);
+}
+.suggestions-link a:hover {
+    color: #fff;
+    text-shadow: 0 0 10px var(--accent2-glow);
+}
+
 /* ============================================
    CONNECTED USER BAR
    ============================================ */
