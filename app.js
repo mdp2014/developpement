@@ -1,63 +1,83 @@
 // Import de la bibliothèque emoji-picker
 import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
 
-const supabaseUrl = 'https://unjdpzraozgcswfucezd.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVuamRwenJhb3pnY3N3ZnVjZXpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5NTMzOTQsImV4cCI6MjA4NTUyOTM5NH0.2fAnI9_Z-iay53GZ2UkXWxBnDULPC6Dm0sCK3XXIMwc';
-const chatMessages      = document.getElementById('chat-messages');
-const messageInput      = document.getElementById('message-input');
-const sendButton        = document.getElementById('send-button');
-const emojiButton       = document.getElementById('emoji-button');
-const emojiPickerWrapper = document.getElementById('emoji-picker-wrapper');
-const userSelect        = document.getElementById('user-select');
-const loginUsername     = document.getElementById('login-username');
-const loginPassword     = document.getElementById('login-password');
-const loginButton       = document.getElementById('login-button');
-const loginContainer    = document.getElementById('login-container');
-const connectedUser     = document.getElementById('connected-user');
-const connectedUsername = document.getElementById('connected-username');
-const logoutButton      = document.getElementById('logout-button');
-const typingIndicator   = document.getElementById('typing-indicator');
+const supabaseUrl = 'https://toglujtvmslqutjeqmrh.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvZ2x1anR2bXNscXV0amVxbXJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1ODg0OTUsImV4cCI6MjA4OTE2NDQ5NX0.uezhrVRl2FTtVRfgXBMAnxcwROUNc91ruVegsyMD38U';
 
-let users = {};
-let currentUserId = null;
-let refreshInterval = null;
-let typingTimeout = null;
-let isTyping = false;
-let currentMessages = [];
+const chatMessages       = document.getElementById('chat-messages');
+const messageInput       = document.getElementById('message-input');
+const sendButton         = document.getElementById('send-button');
+const emojiButton        = document.getElementById('emoji-button');
+const emojiPickerWrapper = document.getElementById('emoji-picker-wrapper');
+const userSelect         = document.getElementById('user-select');
+const loginUsername      = document.getElementById('login-username');
+const loginPassword      = document.getElementById('login-password');
+const loginButton        = document.getElementById('login-button');
+const loginContainer     = document.getElementById('login-container');
+const connectedUser      = document.getElementById('connected-user');
+const connectedUsername  = document.getElementById('connected-username');
+const logoutButton       = document.getElementById('logout-button');
+const typingIndicator    = document.getElementById('typing-indicator');
+const quickReplies       = document.getElementById('quick-replies');
+const summaryButton      = document.getElementById('summary-button');
+const summaryModal       = document.getElementById('summary-modal');
+const summaryContent     = document.getElementById('summary-content');
+const closeSummary       = document.getElementById('close-summary');
+const networkIndicator   = document.getElementById('network-indicator');
+
+let users            = {};
+let currentUserId    = null;
+let refreshInterval  = null;
+let typingTimeout    = null;
+let isTyping         = false;
+let currentMessages  = [];
 let lastMessageCount = 0;
 let emojiPickerInstance = null;
-let emojiPickerOverlay = null;
+let emojiPickerOverlay  = null;
 let sessionValidationInterval = null;
 
-const SESSION_STORAGE_KEY = 'persistent_session_v1';
-const SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 jours
-const SESSION_CHECK_INTERVAL_MS = 1000 * 60 * 5; // 5 minutes
+const SESSION_STORAGE_KEY    = 'persistent_session_v1';
+const SESSION_DURATION_MS    = 1000 * 60 * 60 * 24 * 30; // 30 jours
+const SESSION_CHECK_INTERVAL_MS = 1000 * 60 * 5;          // 5 minutes
 
+// ============================================================
+// RÉSEAU — indicateur de qualité
+// ============================================================
+function updateNetworkIndicator() {
+    if (!navigator.onLine) {
+        networkIndicator.textContent = '🔴';
+        networkIndicator.title = 'Hors ligne';
+        return;
+    }
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (conn) {
+        const type = conn.effectiveType;
+        if (type === '4g')      { networkIndicator.textContent = '🟢'; networkIndicator.title = 'Réseau excellent'; }
+        else if (type === '3g') { networkIndicator.textContent = '🟡'; networkIndicator.title = 'Réseau moyen'; }
+        else                    { networkIndicator.textContent = '🔴'; networkIndicator.title = 'Réseau faible'; }
+    } else {
+        networkIndicator.textContent = '🟢';
+        networkIndicator.title = 'En ligne';
+    }
+}
+window.addEventListener('online',  updateNetworkIndicator);
+window.addEventListener('offline', updateNetworkIndicator);
+updateNetworkIndicator();
+
+// ============================================================
+// SESSION — helpers
+// ============================================================
 function generateRefreshToken() {
     const bytes = new Uint8Array(32);
     window.crypto.getRandomValues(bytes);
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-async function hashPassword(password) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(password);
-    const digest = await window.crypto.subtle.digest('SHA-256', data);
-    return Array.from(new Uint8Array(digest))
-        .map((byte) => byte.toString(16).padStart(2, '0'))
-        .join('');
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function loadSession() {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
-    try {
-        return JSON.parse(raw);
-    } catch (error) {
-        console.warn('Session corrompue, suppression du stockage.', error);
-        localStorage.removeItem(SESSION_STORAGE_KEY);
-        return null;
-    }
+    try { return JSON.parse(raw); }
+    catch (e) { localStorage.removeItem(SESSION_STORAGE_KEY); return null; }
 }
 
 function saveSession(session) {
@@ -75,44 +95,34 @@ function stopSessionValidation() {
     }
 }
 
+// ============================================================
+// SESSION — validation
+// FIX : on compare le mot de passe en clair stocké en BDD
+//       avec le mot de passe en clair stocké dans la session
+//       (pas de double-hash qui cassait la validation)
+// ============================================================
 async function validateSession(session) {
-    if (!session || !session.userId || !session.refreshToken) {
-        return false;
-    }
-
-    const now = Date.now();
-    if (session.expiresAt && now > session.expiresAt) {
-        return false;
-    }
+    if (!session || !session.userId || !session.expiresAt) return false;
+    if (Date.now() > session.expiresAt) return false;
 
     try {
         const response = await fetch(
             `${supabaseUrl}/rest/v1/users?select=id,username,password&id=eq.${session.userId}`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
         );
         const data = await response.json();
-        if (!response.ok || data.length === 0) {
-            return false;
-        }
+        if (!response.ok || data.length === 0) return false;
 
         const user = data[0];
-        const serverPasswordDigest = await hashPassword(user.password);
-        if (serverPasswordDigest !== session.passwordDigest) {
-            return false;
-        }
+        // Comparaison directe en clair (mots de passe stockés en clair en BDD)
+        if (user.password !== session.plainPassword) return false;
 
         session.username = user.username;
-        session.lastValidatedAt = now;
+        session.lastValidatedAt = Date.now();
         saveSession(session);
         return true;
-    } catch (error) {
-        console.warn('Validation de session indisponible:', error);
+    } catch (e) {
+        console.warn('Validation de session indisponible, on garde la session locale:', e);
         return true;
     }
 }
@@ -122,9 +132,7 @@ function startSessionValidation() {
     sessionValidationInterval = setInterval(async () => {
         const session = loadSession();
         const isValid = await validateSession(session);
-        if (!isValid) {
-            logout({ silent: true, reason: 'Session expirée ou révoquée.' });
-        }
+        if (!isValid) logout({ silent: false, reason: 'Session expirée, veuillez vous reconnecter.' });
     }, SESSION_CHECK_INTERVAL_MS);
 }
 
@@ -133,17 +141,14 @@ async function restoreSession() {
     if (!session) return false;
 
     const isValid = await validateSession(session);
-    if (!isValid) {
-        clearSession();
-        return false;
-    }
+    if (!isValid) { clearSession(); return false; }
 
     currentUserId = session.userId;
     users[session.userId] = { id: session.userId, username: session.username };
 
-    loginContainer.style.display = 'none';
-    connectedUser.style.display = 'block';
-    connectedUsername.textContent = session.username;
+    loginContainer.style.display  = 'none';
+    connectedUser.style.display   = 'flex';
+    connectedUsername.textContent  = session.username;
 
     await requestNotificationPermission();
     getMessages();
@@ -157,43 +162,26 @@ async function restoreSession() {
 // ============================================================
 function initEmojiPicker() {
     emojiPickerInstance = document.querySelector('emoji-picker');
-    
-    // Écouter les sélections d'emoji
+    if (!emojiPickerInstance) return;
+
     emojiPickerInstance.addEventListener('emoji-click', (event) => {
-        const cursorPos = messageInput.selectionStart || messageInput.value.length;
+        const cursorPos  = messageInput.selectionStart ?? messageInput.value.length;
         const textBefore = messageInput.value.substring(0, cursorPos);
-        const textAfter = messageInput.value.substring(cursorPos);
-        
+        const textAfter  = messageInput.value.substring(cursorPos);
         messageInput.value = textBefore + event.detail.unicode + textAfter;
-        
-        // Remettre le curseur après l'emoji inséré
-        const newCursorPos = cursorPos + event.detail.unicode.length;
-        messageInput.setSelectionRange(newCursorPos, newCursorPos);
-        
-        // Garder le focus sur l'input
+        const newPos = cursorPos + event.detail.unicode.length;
+        messageInput.setSelectionRange(newPos, newPos);
         messageInput.focus();
     });
 }
 
-function toggleEmojiPicker() {
-    const isVisible = emojiPickerWrapper.style.display !== 'none';
-    
-    if (isVisible) {
-        closeEmojiPicker();
-    } else {
-        openEmojiPicker();
-    }
-}
-
 function openEmojiPicker() {
-    // Créer l'overlay si nécessaire
     if (!emojiPickerOverlay) {
         emojiPickerOverlay = document.createElement('div');
         emojiPickerOverlay.className = 'emoji-picker-overlay';
         emojiPickerOverlay.addEventListener('click', closeEmojiPicker);
         document.body.appendChild(emojiPickerOverlay);
     }
-    
     emojiPickerWrapper.style.display = 'block';
     emojiPickerWrapper.classList.remove('hiding');
     emojiButton.classList.add('active');
@@ -202,33 +190,27 @@ function openEmojiPicker() {
 function closeEmojiPicker() {
     emojiPickerWrapper.classList.add('hiding');
     emojiButton.classList.remove('active');
-    
     setTimeout(() => {
         emojiPickerWrapper.style.display = 'none';
         emojiPickerWrapper.classList.remove('hiding');
     }, 200);
-    
-    if (emojiPickerOverlay && emojiPickerOverlay.parentNode) {
+    if (emojiPickerOverlay?.parentNode) {
         emojiPickerOverlay.parentNode.removeChild(emojiPickerOverlay);
         emojiPickerOverlay = null;
     }
 }
 
-// Initialiser le picker une fois le DOM chargé
+function toggleEmojiPicker() {
+    emojiPickerWrapper.style.display !== 'none' ? closeEmojiPicker() : openEmojiPicker();
+}
+
 document.addEventListener('DOMContentLoaded', initEmojiPicker);
 
-// Toggle emoji picker au clic
-emojiButton.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleEmojiPicker();
-});
+emojiButton.addEventListener('click', (e) => { e.stopPropagation(); toggleEmojiPicker(); });
 
-// Fermer le picker si on clique sur le bouton emoji alors qu'il est ouvert
 document.addEventListener('click', (e) => {
     if (!emojiPickerWrapper.contains(e.target) && e.target !== emojiButton) {
-        if (emojiPickerWrapper.style.display !== 'none') {
-            closeEmojiPicker();
-        }
+        if (emojiPickerWrapper.style.display !== 'none') closeEmojiPicker();
     }
 });
 
@@ -236,41 +218,22 @@ document.addEventListener('click', (e) => {
 // NOTIFICATIONS PUSH
 // ============================================================
 async function requestNotificationPermission() {
-    if (!('Notification' in window)) {
-        console.log('Ce navigateur ne supporte pas les notifications');
-        return false;
-    }
-
-    if (Notification.permission === 'granted') {
-        return true;
-    }
-
+    if (!('Notification' in window)) return false;
+    if (Notification.permission === 'granted') return true;
     if (Notification.permission !== 'denied') {
-        const permission = await Notification.requestPermission();
-        return permission === 'granted';
+        const perm = await Notification.requestPermission();
+        return perm === 'granted';
     }
-
     return false;
 }
 
-function showNotification(title, body, icon = '💬') {
+function showNotification(title, body) {
     if (Notification.permission === 'granted' && document.hidden) {
-        const notification = new Notification(title, {
-            body: body,
-            icon: icon,
-            badge: icon,
-            tag: 'message-notification',
-            requireInteraction: false,
-            silent: false
+        const n = new Notification(title, {
+            body, tag: 'message-notification', requireInteraction: false, silent: false
         });
-
-        notification.onclick = () => {
-            window.focus();
-            notification.close();
-        };
-
-        // Auto-fermer après 5 secondes
-        setTimeout(() => notification.close(), 5000);
+        n.onclick = () => { window.focus(); n.close(); };
+        setTimeout(() => n.close(), 5000);
     }
 }
 
@@ -279,25 +242,19 @@ function showNotification(title, body, icon = '💬') {
 // ============================================================
 async function getUsers() {
     const response = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, {
-        method: 'GET',
-        headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-        }
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
     });
     const data = await response.json();
-    if (!response.ok) {
-        console.error('Error fetching users:', data);
-    } else {
-        userSelect.innerHTML = '';
-        data.forEach(user => {
-            const option = document.createElement('option');
-            option.value    = user.id;
-            option.textContent = user.username;
-            userSelect.appendChild(option);
-            users[user.id] = user;
-        });
-    }
+    if (!response.ok) { console.error('Erreur getUsers:', data); return; }
+
+    userSelect.innerHTML = '';
+    data.forEach(user => {
+        const option = document.createElement('option');
+        option.value = user.id;
+        option.textContent = user.username;
+        userSelect.appendChild(option);
+        users[user.id] = user;
+    });
 }
 
 // ============================================================
@@ -305,48 +262,35 @@ async function getUsers() {
 // ============================================================
 function getGeolocation() {
     return new Promise((resolve, reject) => {
-        if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(
-                position => resolve({
-                    latitude:  position.coords.latitude,
-                    longitude: position.coords.longitude
-                }),
-                error => reject(error)
-            );
-        } else {
-            reject(new Error('Geolocation is not supported by this browser.'));
-        }
+        if (!navigator.geolocation) { reject(new Error('Non supporté')); return; }
+        navigator.geolocation.getCurrentPosition(
+            pos => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+            err => reject(err)
+        );
     });
 }
 
-async function getCityFromCoordinates(latitude, longitude) {
-    const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
-    const data = await response.json();
-    return data.address.city || data.address.town || data.address.village || 'Unknown';
+async function getCityFromCoordinates(lat, lon) {
+    try {
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+        const d = await r.json();
+        return d.address?.city || d.address?.town || d.address?.village || null;
+    } catch { return null; }
 }
 
 // ============================================================
-// INDICATEUR "EN TRAIN D'ÉCRIRE"
+// TYPING INDICATOR
 // ============================================================
 async function updateTypingStatus(isTypingNow) {
     if (!currentUserId || !userSelect.value) return;
-
     try {
-        // Vérifier si un statut existe déjà
-        const checkResponse = await fetch(
+        const checkRes = await fetch(
             `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
         );
-        const existingStatus = await checkResponse.json();
+        const existing = await checkRes.json();
 
-        if (existingStatus.length > 0) {
-            // Mettre à jour le statut existant
+        if (existing.length > 0) {
             await fetch(
                 `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
                 {
@@ -356,14 +300,10 @@ async function updateTypingStatus(isTypingNow) {
                         'apikey': supabaseKey,
                         'Authorization': `Bearer ${supabaseKey}`
                     },
-                    body: JSON.stringify({
-                        is_typing: isTypingNow,
-                        updated_at: new Date().toISOString()
-                    })
+                    body: JSON.stringify({ is_typing: isTypingNow, updated_at: new Date().toISOString() })
                 }
             );
         } else {
-            // Créer un nouveau statut
             await fetch(`${supabaseUrl}/rest/v1/typing_status`, {
                 method: 'POST',
                 headers: {
@@ -380,9 +320,7 @@ async function updateTypingStatus(isTypingNow) {
                 })
             });
         }
-    } catch (error) {
-        console.error('Erreur lors de la mise à jour du statut de frappe:', error);
-    }
+    } catch (e) { console.error('updateTypingStatus:', e); }
 }
 
 async function checkTypingStatus() {
@@ -390,120 +328,155 @@ async function checkTypingStatus() {
         typingIndicator.style.display = 'none';
         return;
     }
-
     try {
-        const response = await fetch(
+        const r = await fetch(
             `${supabaseUrl}/rest/v1/typing_status?user_id=eq.${userSelect.value}&recipient_id=eq.${currentUserId}&select=*`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
         );
-        const data = await response.json();
+        const data = await r.json();
 
         if (data.length > 0) {
             const status = data[0];
-            const updatedAt = new Date(status.updated_at);
-            const now = new Date();
-            const secondsSinceUpdate = (now - updatedAt) / 1000;
-
-            // Afficher l'indicateur seulement si la mise à jour est récente (moins de 3 secondes)
-            if (status.is_typing && secondsSinceUpdate < 3) {
-                const recipientName = users[userSelect.value]?.username || 'L\'utilisateur';
-                typingIndicator.textContent = `${recipientName} est en train d'écrire...`;
-                typingIndicator.style.display = 'block';
+            const secondsSince = (Date.now() - new Date(status.updated_at)) / 1000;
+            if (status.is_typing && secondsSince < 3) {
+                const name = users[userSelect.value]?.username || 'L\'utilisateur';
+                typingIndicator.innerHTML = `
+                    <span>${name} est en train d'écrire</span>
+                    <span class="typing-dots">
+                        <span></span><span></span><span></span>
+                    </span>`;
+                typingIndicator.style.display = 'flex';
             } else {
                 typingIndicator.style.display = 'none';
             }
         } else {
             typingIndicator.style.display = 'none';
         }
-    } catch (error) {
-        console.error('Erreur lors de la vérification du statut de frappe:', error);
-    }
+    } catch (e) { console.error('checkTypingStatus:', e); }
 }
 
-// Gérer la saisie dans le champ de message
 messageInput.addEventListener('input', () => {
-    if (!isTyping) {
-        isTyping = true;
-        updateTypingStatus(true);
-    }
-
-    // Réinitialiser le timeout
+    if (!isTyping) { isTyping = true; updateTypingStatus(true); }
     clearTimeout(typingTimeout);
-    typingTimeout = setTimeout(() => {
-        isTyping = false;
-        updateTypingStatus(false);
-    }, 2000); // Arrêter après 2 secondes d'inactivité
+    typingTimeout = setTimeout(() => { isTyping = false; updateTypingStatus(false); }, 2000);
 });
 
 // ============================================================
-// ENVOI DE MESSAGES
+// RÉPONSES RAPIDES
 // ============================================================
-async function sendMessage(userId, content) {
-    console.log('Sending message:', { userId, content });
-    let latitude = null, longitude = null, city = null;
-
-    try {
-        const geolocation = await getGeolocation();
-        latitude  = geolocation.latitude;
-        longitude = geolocation.longitude;
-        city      = await getCityFromCoordinates(latitude, longitude);
-    } catch (error) {
-        console.warn('Géolocalisation indisponible, message envoyé sans position :', error);
+function generateQuickReplies(lastMessage) {
+    if (!lastMessage || lastMessage.id_sent === currentUserId) {
+        quickReplies.style.display = 'none';
+        return;
     }
 
-    // Arrêter l'indicateur de frappe
-    isTyping = false;
-    clearTimeout(typingTimeout);
-    await updateTypingStatus(false);
+    const content = lastMessage.content.toLowerCase();
+    const replies = [];
+
+    if (content.includes('bonjour') || content.includes('salut') || content.includes('hello')) {
+        replies.push('Bonjour ! 👋', 'Salut !', 'Hello !');
+    } else if (content.includes('merci')) {
+        replies.push('De rien !', 'Avec plaisir !', '😊');
+    } else if (content.includes('comment') && (content.includes('vas') || content.includes('allez'))) {
+        replies.push('Très bien merci !', 'Ça va et toi ?', 'Super !');
+    } else if (content.includes('?')) {
+        replies.push('Oui 👍', 'Non', 'Je ne sais pas');
+    } else if (content.includes('ok') || content.includes('d\'accord')) {
+        replies.push('Parfait !', '👍', 'Super !');
+    } else {
+        replies.push('👍', 'OK', '😊');
+    }
+
+    if (replies.length === 0) { quickReplies.style.display = 'none'; return; }
+
+    quickReplies.innerHTML = '';
+    replies.forEach(reply => {
+        const btn = document.createElement('button');
+        btn.className   = 'quick-reply-btn';
+        btn.textContent = reply;
+        btn.addEventListener('click', () => {
+            messageInput.value = reply;
+            handleSend();
+            quickReplies.style.display = 'none';
+        });
+        quickReplies.appendChild(btn);
+    });
+    quickReplies.style.display = 'flex';
+}
+
+// ============================================================
+// RÉSUMÉ DE CONVERSATION (Claude API)
+// ============================================================
+async function generateConversationSummary() {
+    if (currentMessages.length < 3) {
+        summaryContent.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px;">Pas assez de messages pour générer un résumé (minimum 3).</p>';
+        return;
+    }
+
+    summaryContent.innerHTML = '<div class="loading">✨ Génération du résumé en cours…</div>';
+
+    const conversationText = currentMessages.map(msg => {
+        const sender = users[msg.id_sent]?.username || 'Inconnu';
+        const time   = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return `[${time}] ${sender}: ${msg.content}`;
+    }).join('\n');
 
     try {
-        const response = await fetch(`${supabaseUrl}/rest/v1/messages`, {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                id_sent:     userId,
-                content:     content,
-                created_at:  new Date().toISOString(),
-                id_received: userSelect.value,
-                read_at:     null,
-                latitude:    latitude,
-                longitude:   longitude,
-                city:        city
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 1000,
+                messages: [{
+                    role: 'user',
+                    content: `Voici une conversation entre plusieurs utilisateurs. Fais un résumé concis et clair en français, en identifiant les points clés, les décisions prises et les éventuelles actions à faire. Utilise des emojis pour rendre le résumé plus lisible.\n\nConversation :\n${conversationText}`
+                }]
             })
         });
+
         const data = await response.json();
+
         if (!response.ok) {
-            console.error('Error inserting message:', data);
-        } else {
-            console.log('Message inserted:', data);
-            getMessages();
-            return true;
+            throw new Error(data.error?.message || 'Erreur API');
         }
-    } catch (error) {
-        console.error('Error sending message:', error);
+
+        const text = data.content?.[0]?.text || 'Résumé indisponible.';
+        // Convertir les sauts de ligne en HTML
+        const html = text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\n/g, '<br>');
+
+        summaryContent.innerHTML = `<h3>📝 Résumé de la conversation</h3><p>${html}</p>`;
+
+    } catch (e) {
+        console.error('Erreur résumé:', e);
+        summaryContent.innerHTML = `<p style="color:var(--danger);">Erreur lors de la génération du résumé : ${e.message}</p>`;
     }
-    return false;
 }
+
+summaryButton.addEventListener('click', () => {
+    summaryModal.style.display = 'flex';
+    generateConversationSummary();
+});
+
+closeSummary.addEventListener('click', () => {
+    summaryModal.style.display = 'none';
+});
+
+summaryModal.addEventListener('click', (e) => {
+    if (e.target === summaryModal) summaryModal.style.display = 'none';
+});
 
 // ============================================================
 // ACCUSÉS DE RÉCEPTION
 // ============================================================
 async function markMessagesAsRead() {
     if (!currentUserId || !userSelect.value) return;
-
     try {
-        // Marquer comme lus tous les messages reçus de l'utilisateur sélectionné qui ne sont pas encore lus
-        const response = await fetch(
+        await fetch(
             `${supabaseUrl}/rest/v1/messages?id_sent=eq.${userSelect.value}&id_received=eq.${currentUserId}&read_at=is.null`,
             {
                 method: 'PATCH',
@@ -513,39 +486,27 @@ async function markMessagesAsRead() {
                     'Authorization': `Bearer ${supabaseKey}`,
                     'Prefer': 'return=minimal'
                 },
-                body: JSON.stringify({
-                    read_at: new Date().toISOString()
-                })
+                body: JSON.stringify({ read_at: new Date().toISOString() })
             }
         );
-
-        if (response.ok) {
-            console.log('Messages marqués comme lus');
-        }
-    } catch (error) {
-        console.error('Erreur lors du marquage des messages comme lus:', error);
-    }
+    } catch (e) { console.error('markMessagesAsRead:', e); }
 }
 
 // ============================================================
-// RÉCUPÉRATION DES MESSAGES
+// MESSAGES — suppression
 // ============================================================
 async function deleteMessage(messageId) {
-    const response = await fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
+    const r = await fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
         method: 'DELETE',
-        headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-        }
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
     });
-    if (!response.ok) {
-        console.error('Error deleting message:', await response.json());
-    } else {
-        console.log('Message deleted:', messageId);
-        getMessages();
-    }
+    if (r.ok) getMessages();
+    else console.error('deleteMessage:', await r.json());
 }
 
+// ============================================================
+// MESSAGES — récupération & affichage
+// ============================================================
 async function getMessages() {
     if (!currentUserId || !userSelect.value) {
         chatMessages.innerHTML = '';
@@ -554,128 +515,103 @@ async function getMessages() {
         return;
     }
 
-    console.log('Fetching messages...');
-    const query = `${supabaseUrl}/rest/v1/messages?select=*&order=created_at.asc&or=(and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId}))`;
-    const response = await fetch(query, {
-        method: 'GET',
-        headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-        }
+    const query = `${supabaseUrl}/rest/v1/messages?select=*&order=created_at.asc` +
+        `&or=(and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),` +
+        `and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId}))`;
+
+    const r = await fetch(query, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
     });
-    const data = await response.json();
-    if (!response.ok) {
-        console.error('Error fetching messages:', data);
-    } else {
-        console.log('Messages fetched:', data);
-        
-        // Détecter les nouveaux messages pour les notifications
-        if (data.length > lastMessageCount && lastMessageCount > 0) {
-            const newMessages = data.slice(lastMessageCount);
-            newMessages.forEach(msg => {
-                if (msg.id_sent === userSelect.value && msg.id_received === currentUserId) {
-                    const senderName = users[msg.id_sent]?.username || 'Un utilisateur';
-                    showNotification(
-                        `Nouveau message de ${senderName}`,
-                        msg.content.substring(0, 50) + (msg.content.length > 50 ? '...' : '')
-                    );
-                }
-            });
+    const data = await r.json();
+    if (!r.ok) { console.error('getMessages:', data); return; }
+
+    // Notifications pour les nouveaux messages
+    if (data.length > lastMessageCount && lastMessageCount > 0) {
+        data.slice(lastMessageCount).forEach(msg => {
+            if (msg.id_sent === userSelect.value && msg.id_received === currentUserId) {
+                const name = users[msg.id_sent]?.username || 'Un utilisateur';
+                showNotification(`Nouveau message de ${name}`, msg.content.substring(0, 50));
+            }
+        });
+    }
+    lastMessageCount = data.length;
+
+    await markMessagesAsRead();
+
+    // Ne redessiner que s'il y a des changements
+    const hasChanges =
+        data.length !== currentMessages.length ||
+        data.some((m, i) => m.id !== currentMessages[i]?.id || m.read_at !== currentMessages[i]?.read_at);
+
+    if (!hasChanges) return;
+
+    const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
+    currentMessages = data;
+    chatMessages.innerHTML = '';
+    let lastDate = null;
+
+    data.forEach(message => {
+        const dateObj     = new Date(message.created_at);
+        const messageDate = dateObj.toLocaleDateString('fr-FR');
+        const messageTime = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+        const senderName  = users[message.id_sent]?.username || 'Inconnu';
+        const isMine      = message.id_sent === currentUserId;
+
+        // Séparateur de date
+        if (messageDate !== lastDate) {
+            const dateEl = document.createElement('div');
+            dateEl.textContent = messageDate;
+            dateEl.classList.add('date');
+            chatMessages.appendChild(dateEl);
+            lastDate = messageDate;
         }
-        lastMessageCount = data.length;
 
-        // Marquer les messages comme lus
-        await markMessagesAsRead();
-        
-        // Vérifier s'il y a de nouveaux messages ou des suppressions
-        const dataIds = data.map(m => m.id);
-        const currentIds = currentMessages.map(m => m.id);
-        const hasChanges = dataIds.length !== currentIds.length || 
-                          dataIds.some((id, idx) => id !== currentIds[idx]) ||
-                          data.some((msg, idx) => currentMessages[idx]?.read_at !== msg.read_at);
-        
-        // Ne redessiner que s'il y a des changements
-        if (hasChanges) {
-            // Sauvegarder la position de scroll actuelle
-            const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
-            
-            currentMessages = data;
-            chatMessages.innerHTML = '';
-            let lastDate = null;
+        const msgEl = document.createElement('div');
+        msgEl.classList.add('message', isMine ? 'sent' : 'received');
 
-            data.forEach(message => {
-                const dateObj   = new Date(message.created_at);
-                const messageDate = dateObj.toLocaleDateString();
-                const messageTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                const senderName  = users[message.id_sent]?.username || 'Unknown';
+        // Expéditeur
+        const senderSpan = document.createElement('span');
+        senderSpan.classList.add('msg-sender');
+        senderSpan.textContent = senderName;
 
-                // Date separator
-                if (messageDate !== lastDate) {
-                    const dateElement = document.createElement('div');
-                    dateElement.textContent = messageDate;
-                    dateElement.classList.add('date');
-                    chatMessages.appendChild(dateElement);
-                    lastDate = messageDate;
-                }
+        // Contenu
+        const textNode = document.createTextNode(message.content);
 
-                // Bubble wrapper
-                const messageElement = document.createElement('div');
-                messageElement.classList.add('message');
+        // Méta (ville · heure · statut lecture)
+        const metaSpan = document.createElement('span');
+        metaSpan.classList.add('msg-meta');
+        let metaText = message.city ? `📍 ${message.city} · ${messageTime}` : messageTime;
 
-                // Sender label
-                const senderSpan = document.createElement('span');
-                senderSpan.classList.add('msg-sender');
-                senderSpan.textContent = senderName;
-
-                // Main text
-                const textNode = document.createTextNode(message.content);
-
-                // Meta (city + time + read status)
-                const metaSpan = document.createElement('span');
-                metaSpan.classList.add('msg-meta');
-                
-                let metaText = message.city
-                    ? `📍 ${message.city} · ${messageTime}`
-                    : messageTime;
-
-                // Ajouter l'indicateur de lecture pour les messages envoyés
-                if (message.id_sent === currentUserId) {
-                    if (message.read_at) {
-                        metaText += ' · ✓✓ Lu';
-                        metaSpan.classList.add('read');
-                    } else {
-                        metaText += ' · ✓ Envoyé';
-                        metaSpan.classList.add('sent');
-                    }
-                }
-
-                metaSpan.textContent = metaText;
-
-                messageElement.appendChild(senderSpan);
-                messageElement.appendChild(textNode);
-                messageElement.appendChild(metaSpan);
-
-                if (message.id_sent === currentUserId) {
-                    messageElement.classList.add('sent');
-                    // Delete button (only on own messages)
-                    const deleteButton = document.createElement('span');
-                    deleteButton.textContent = '✖';
-                    deleteButton.classList.add('delete-button');
-                    deleteButton.addEventListener('click', () => deleteMessage(message.id));
-                    messageElement.appendChild(deleteButton);
-                } else {
-                    messageElement.classList.add('received');
-                }
-
-                chatMessages.appendChild(messageElement);
-            });
-
-            // Auto-scroll uniquement si l'utilisateur était déjà en bas
-            if (wasAtBottom) {
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+        if (isMine) {
+            if (message.read_at) {
+                metaText += ' · 👁️ Lu';
+                metaSpan.classList.add('read');
+            } else {
+                metaText += ' · ✓ Envoyé';
+                metaSpan.classList.add('sent');
             }
         }
-    }
+        metaSpan.textContent = metaText;
+
+        msgEl.appendChild(senderSpan);
+        msgEl.appendChild(textNode);
+        msgEl.appendChild(metaSpan);
+
+        if (isMine) {
+            const delBtn = document.createElement('span');
+            delBtn.textContent = '✖';
+            delBtn.classList.add('delete-button');
+            delBtn.addEventListener('click', () => deleteMessage(message.id));
+            msgEl.appendChild(delBtn);
+        }
+
+        chatMessages.appendChild(msgEl);
+    });
+
+    if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Réponses rapides sur le dernier message reçu
+    if (data.length > 0) generateQuickReplies(data[data.length - 1]);
 }
 
 // ============================================================
@@ -686,172 +622,166 @@ function refreshMessages() {
     refreshInterval = setInterval(() => {
         getMessages();
         checkTypingStatus();
-    }, 1000); // Vérifier toutes les secondes
+    }, 1000);
 }
 
 // ============================================================
-// CONNEXION / DÉCONNEXION
+// ENVOI DE MESSAGE
+// ============================================================
+async function sendMessage(userId, content) {
+    let latitude = null, longitude = null, city = null;
+    try {
+        const geo = await getGeolocation();
+        latitude  = geo.latitude;
+        longitude = geo.longitude;
+        city      = await getCityFromCoordinates(latitude, longitude);
+    } catch { /* géoloc optionnelle */ }
+
+    isTyping = false;
+    clearTimeout(typingTimeout);
+    await updateTypingStatus(false);
+
+    try {
+        const r = await fetch(`${supabaseUrl}/rest/v1/messages`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`
+            },
+            body: JSON.stringify({
+                id_sent:     userId,
+                content,
+                created_at:  new Date().toISOString(),
+                id_received: userSelect.value,
+                read_at:     null,
+                latitude,
+                longitude,
+                city
+            })
+        });
+        if (r.ok) { getMessages(); return true; }
+        else console.error('sendMessage:', await r.json());
+    } catch (e) { console.error('sendMessage:', e); }
+    return false;
+}
+
+async function handleSend() {
+    if (!currentUserId) { alert('Veuillez vous connecter pour envoyer un message'); return; }
+    const content = messageInput.value.trim();
+    if (!content) return;
+    messageInput.value = '';
+    messageInput.focus();
+    quickReplies.style.display = 'none';
+    await sendMessage(currentUserId, content);
+}
+
+sendButton.addEventListener('click', handleSend);
+messageInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleSend(); }
+});
+
+// ============================================================
+// CONNEXION
+// FIX : on stocke le mot de passe en clair dans la session
+//       (correspond à ce qui est en BDD) pour que validateSession fonctionne
 // ============================================================
 async function login() {
     const username = loginUsername.value.trim();
     const password = loginPassword.value;
 
-    if (!username || !password) {
-        alert('Veuillez remplir tous les champs');
-        return;
-    }
+    if (!username || !password) { alert('Veuillez remplir tous les champs'); return; }
 
     try {
-        const response = await fetch(
+        const r = await fetch(
             `${supabaseUrl}/rest/v1/users?select=id,username,password&username=eq.${encodeURIComponent(username)}`,
-            {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': `Bearer ${supabaseKey}`
-                }
-            }
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
         );
+        const data = await r.json();
 
-        const data = await response.json();
-
-        if (!response.ok) {
-            console.error('Erreur lors de la connexion:', data);
-            alert('Erreur de connexion');
-            return;
-        }
-
-        if (data.length === 0) {
-            alert('Utilisateur non trouvé');
-            return;
-        }
+        if (!r.ok)            { alert('Erreur de connexion'); return; }
+        if (data.length === 0){ alert('Utilisateur non trouvé'); return; }
 
         const user = data[0];
+        if (user.password !== password) { alert('Mot de passe incorrect'); return; }
 
-        if (user.password !== password) {
-            alert('Mot de passe incorrect');
-            return;
-        }
-
-        // Demander la permission pour les notifications
         await requestNotificationPermission();
 
         currentUserId = user.id;
-        alert('Connexion réussie');
-        loginContainer.style.display  = 'none';
-        connectedUser.style.display   = 'block';
-        connectedUsername.textContent  = user.username;
-        
         users[user.id] = { id: user.id, username: user.username };
 
-        const session = {
-            userId: user.id,
-            username: user.username,
-            refreshToken: generateRefreshToken(),
-            passwordDigest: await hashPassword(password),
-            issuedAt: Date.now(),
-            expiresAt: Date.now() + SESSION_DURATION_MS,
+        loginContainer.style.display  = 'none';
+        connectedUser.style.display   = 'flex';
+        connectedUsername.textContent  = user.username;
+
+        // FIX : on stocke plainPassword pour la validation de session
+        saveSession({
+            userId:        user.id,
+            username:      user.username,
+            plainPassword: password,             // comparaison directe en clair
+            refreshToken:  generateRefreshToken(),
+            issuedAt:      Date.now(),
+            expiresAt:     Date.now() + SESSION_DURATION_MS,
             lastValidatedAt: Date.now()
-        };
-        saveSession(session);
-        
+        });
+
         getMessages();
         refreshMessages();
         startSessionValidation();
 
-    } catch (error) {
-        console.error('Erreur lors de la connexion:', error);
-        alert('Erreur de connexion');
-    }
+    } catch (e) { console.error('login:', e); alert('Erreur de connexion'); }
 }
 
+// ============================================================
+// DÉCONNEXION
+// ============================================================
 async function logout(options = {}) {
     const { silent = false, reason = '' } = options;
-    // Arrêter l'indicateur de frappe
-    if (isTyping) {
-        await updateTypingStatus(false);
-    }
-    
-    // Fermer le emoji picker
+    if (isTyping) await updateTypingStatus(false);
     closeEmojiPicker();
-    
+
     currentUserId = null;
-    isTyping = false;
+    isTyping      = false;
     clearTimeout(typingTimeout);
-    
-    if (refreshInterval) {
-        clearInterval(refreshInterval);
-        refreshInterval = null;
-    }
+    if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
     stopSessionValidation();
     clearSession();
-    loginContainer.style.display = 'block';
-    connectedUser.style.display  = 'none';
-    chatMessages.innerHTML       = '';
-    currentMessages = [];
+
+    loginContainer.style.display  = 'block';
+    connectedUser.style.display   = 'none';
+    chatMessages.innerHTML        = '';
+    currentMessages  = [];
     lastMessageCount = 0;
     typingIndicator.style.display = 'none';
+    quickReplies.style.display    = 'none';
 
-    if (!silent && reason) {
-        alert(reason);
-    }
+    if (!silent && reason) alert(reason);
 }
-
-// ============================================================
-// ENVOI DE MESSAGES
-// ============================================================
-async function handleSend() {
-    if (currentUserId) {
-        const content = messageInput.value.trim();
-        if (content !== '') {
-            messageInput.value = '';
-            messageInput.focus();
-            
-            await sendMessage(currentUserId, content);
-        }
-    } else {
-        alert('Veuillez vous connecter pour envoyer un message');
-    }
-}
-
-sendButton.addEventListener('click', handleSend);
-
-messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSend();
-    }
-});
 
 loginButton.addEventListener('click', login);
-logoutButton.addEventListener('click', logout);
-
+logoutButton.addEventListener('click', () => logout());
 loginPassword.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        login();
-    }
+    if (e.key === 'Enter') { e.preventDefault(); login(); }
 });
 
+// ============================================================
+// INIT
+// ============================================================
 window.onload = () => {
     getUsers().then(async () => {
         const restored = await restoreSession();
-        if (!restored) {
-            getMessages();
-        }
+        if (!restored) getMessages();
     });
 };
 
 userSelect.addEventListener('change', () => {
-    currentMessages = [];
+    currentMessages  = [];
     lastMessageCount = 0;
     typingIndicator.style.display = 'none';
+    quickReplies.style.display    = 'none';
     getMessages();
 });
 
-// Nettoyer le statut de frappe quand on quitte la page
 window.addEventListener('beforeunload', () => {
-    if (isTyping && currentUserId) {
-        updateTypingStatus(false);
-    }
+    if (isTyping && currentUserId) updateTypingStatus(false);
 });
