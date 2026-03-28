@@ -373,297 +373,140 @@ function generateQuickReplies(lastMessage) {
     const content = lastMessage.content.toLowerCase().trim();
     const replies = [];
 
-    // Détection des intentions avec patterns enrichis - 500+ suggestions au total
+    // Optimisation : pas de suggestions pour messages très courts
+    if (content.length < 3) {
+        quickReplies.style.display = 'none';
+        return;
+    }
+
+    // Détection des intentions avec patterns optimisés - réduits pour performance
     const patterns = {
         greeting: {
-            keywords: ['bonjour', 'salut', 'hello', 'hi', 'allo', 'coucou', 'yo', 'bonsoir', 'bonne journée', 'good morning', 'good evening', 'hey', 'heyy', 'heyyy'],
-            replies: [
-                '👋 Bonjour !', 'Salut !', 'Hello !', 'Coucou !', 'Bonsoir !', 'Ça va ?', 'Hey !', 'Yo !',
-                'Binj !', 'Salutations !', 'Enchanté !', 'À toi !', 'Bien le bonjour 👋', 'Ouais salut',
-                'Hello toi !', 'Yo mon ami', 'Coucou c\'est moi', 'Allo allo', '👋', 'Bienvenue',
-                'Comment ça va toi ?', 'Ça boume ?', 'Ça va bien ?', 'Tu vas bien ?', 'Ça fait longtemps',
-                'Ravi de te revoir', 'Enfin !', 'T\'es là toi !', 'Une belle journée n\'est-ce pas ?'
-            ]
+            keywords: ['bonjour', 'salut', 'hello', 'coucou', 'bonsoir'],
+            replies: ['👋 Bonjour !', 'Salut !', 'Hello !', 'Coucou !', 'Bonsoir !', 'Ça va ?']
         },
         thanks: {
-            keywords: ['merci', 'thanks', 'thx', 'merci beaucoup', 'super merci', 'merci !', 'merci!!!', 'thanks mate', 'gracias', 'thank you', 'cheers'],
-            replies: [
-                'De rien !', 'Avec plaisir !', '😊', 'C\'est normal', 'Pas de souci !', 'À bientôt !',
-                'Heureux de t\'aider', 'Bien sûr', 'Pour toi toujours', 'C\'est gentil de demander',
-                'Anytime !', 'Mon plaisir', 'Pas besoin de remercier', 'Rien que pour toi',
-                '😊 De rien', 'Avec le sourire', 'T\'as raison', 'Tout le plaisir est pour moi',
-                'C\'est l\'amitié', 'Toujours là quand tu as besoin', 'Service client 😄', 'No prob',
-                'Satisfait ?', 'Ça t\'aide ?', 'Besoin d\'autre chose ?', 'Je suis là pour ça',
-                'C\'est mon travail', 'Happy to help', 'Ya pas de quoi', 'Simplement',
-                'Tu es trop sympa', 'De mon côté ça va', 'C\'est cool', 'Je suis là quand même'
-            ]
+            keywords: ['merci', 'thanks', 'thx'],
+            replies: ['De rien !', 'Avec plaisir !', '😊', 'C\'est normal', 'Pas de souci !']
         },
         howareyou: {
-            keywords: ['comment vas', 'how are', 'ça va', 'tu vas', 'vous allez', 'comment ça', 'comment tu vas', 'comment tu vais', 'ça va comment', 'et toi', 'et vous'],
-            replies: [
-                'Très bien merci !', 'Ça va et toi ?', 'Super !', 'Pas mal !', 'Tout va bien 😊', 'En forme !',
-                'Nickel !', 'Ça va nickel', 'Je suis en pleine forme', 'Ça roule wesh', 'Top du top',
-                'J\'ai pas à me plaindre', 'Ça pourrait être pire', 'Au top', 'Formidable',
-                'Excellent !', 'Fantastique !', '🔥', 'Vraiment bien', 'C\'est cool',
-                'Je suis heureux', 'Le moral est bon', 'Rien à signaler', 'Tout baigne',
-                'Entre bien et très bien', 'Plutôt pas mal', 'J\'ai connu mieux', 'Ça va aller',
-                'Pas trop mal pour toi ?', 'Et de ton côté ?', 'Tu me dis', 'Et toi ça gaze ?',
-                'De plus en plus cool', 'Ça s\'améliore', 'Bof bof', 'Y a des hauts et des bas'
-            ]
+            keywords: ['comment vas', 'ça va', 'tu vas'],
+            replies: ['Très bien merci !', 'Ça va et toi ?', 'Super !', 'Pas mal !', 'En forme !']
         },
         agreement: {
-            keywords: ['ok', 'd\'accord', 'oui', 'yes', 'yep', 'okay', 'sûr', 'certain', 'absolument', 'bien sûr', 'ouais', 'ouaip', 'yup', 'ok'],
-            replies: [
-                'Parfait !', '👍', 'Super !', 'Génial !', 'D\'accord', 'C\'est bon', 'Entendu',
-                'Impeccable', 'Ouais', 'D\'acc', 'Yep', 'Yup', 'Sure', 'Oki dokey', 'Roger',
-                'Message reçu', '✅', 'C\'est noté', 'Je prends note', 'Bien compris',
-                'Sans problème', 'Très bien', 'Ok parfait', 'Banco', 'Motus',
-                'Validé', 'Accepté', 'Approuvé', '👌', 'Magnifique', 'Pas de souci',
-                'Je suis d\'accord', 'Tout à fait', 'Évidemment', 'Certainement', 'Absolument',
-                'C\'est dingue qu\'on soit d\'accord', 'Exactement', 'Pile poil', 'Tout juste',
-                'On se comprend', 'High five 🙌', 'Ça match', 'On parle la même langue',
-                'Je valide', 'Je signe', 'Top choix', 'Impeccable vraiment'
-            ]
+            keywords: ['ok', 'oui', 'yes', 'd\'accord'],
+            replies: ['Parfait !', '👍', 'Super !', 'Génial !', 'D\'accord']
         },
         disagreement: {
-            keywords: ['non', 'no', 'nope', 'pas d\'accord', 'refused', 'refus', 'pas possible', 'vraiment pas', 'certainement pas', 'nein', 'nada'],
-            replies: [
-                'D\'accord', 'Pas de souci', 'Compris', 'Sans problème', 'Pas grave', 'Comme tu veux',
-                'Pas de prob', 'C\'est ok', 'Je comprends', 'Je respecte', 'Pas de soucis',
-                'Aucun souci', 'Libre à toi', 'À ta guise', 'C\'est bon', 'Tranquille',
-                'Zen', 'Pas d\'inquiétude', 'Ça va', 'Peut-être une prochaine fois', 'C\'est rien',
-                'Je comprends ton point', 'Je vois', 'D\'accord avec toi', 'Tu as raison',
-                'On reessayera', 'Pas grave mon gars'
-            ]
+            keywords: ['non', 'no', 'pas d\'accord'],
+            replies: ['D\'accord', 'Pas de souci', 'Compris', 'Sans problème', 'Pas grave']
         },
         apology: {
-            keywords: ['désolé', 'sorry', 'excuse', 'pardon', 'je regrette', 'my bad', 'faute', 'mea culpa', 'oups'],
-            replies: [
-                'Pas grave !', 'T\'inquiète pas', 'Aucun souci', 'C\'est oublié', 'On en parle plus',
-                '😊', 'Pas de problème', 'Je te pardonne', 'Faut pas', 'Pas d\'inquiétude',
-                'Y a pas de mal', 'Ça arrive à tout le monde', 'Sois pas désolé', 'C\'est rien du tout',
-                'Aucune rancune', 'On tourne la page', 'À l\'eau les soucis', 'Du passé tout ça',
-                'Pas besoin de t\'excuser', 'Je sais que tu n\'as pas fait exprès', 'On reste potes',
-                'Je comprends', 'Pas grave mec', 'Go de l\'avant', 'C\'est bon mon gars'
-            ]
+            keywords: ['désolé', 'sorry', 'pardon'],
+            replies: ['Pas grave !', 'T\'inquiète pas', 'Aucun souci', 'C\'est oublié']
         },
         love: {
-            keywords: ['t\'aime', 'love', 'adore', 'amo', 'tu es gentil', 'tu es cool', 'generous', 'kind', 'sympathique'],
-            replies: [
-                'Moi aussi 😊', 'Toi aussi !', 'Tu es cool', 'C\'est gentil', '❤️', 'Pareil 😄',
-                'Je t\'aime trop', '💕', 'T\'es le meilleur', 'T\'es awesome', 'Je t\'adore aussi',
-                'Sens bien reçu', 'Du pareil au même', 'Mutuel', 'Le sentiment est réciproque',
-                '😍', 'Tu fais mon jour', 'T\'es super gentil', 'Je te le rends', 'Trop sympa',
-                'Je suis fan', 'Tu me plais beaucoup', 'T\'es formidable', 'J\'apprécie vraiment',
-                'C\'est réciproque', 'Bisous', 'On se comprend', 'T\'es incroyable'
-            ]
+            keywords: ['t\'aime', 'love', 'adore'],
+            replies: ['Moi aussi 😊', 'Toi aussi !', '❤️', 'Pareil 😄']
         },
         question_general: {
-            keywords: ['quoi', 'pourquoi', 'lequel', 'laquelle', 'lesquels', 'où', 'quand', 'qui', 'comment', 'quoi de neuf'],
-            replies: [
-                'C\'est intéressant', 'Bonne question', 'Je sais pas trop', 'À voir', 'Peut-être',
-                'Je vais réfléchir', '🤔', 'Complexe', 'Faudrait voir', 'Je crois que...',
-                'Hmm...', 'Bonne question effectivement', 'Là je sais pas', 'Faudrait mieux connaître',
-                'Ça dépend', 'C\'est une excellente question', 'Je dois y penser', 'Donne moi une sec',
-                'Je vais chercher', 'C\'est pas simple', 'Y a plusieurs réponses', 'Pas obvious',
-                'À définir', 'Intéressant comme thème', 'Bon point', 'À approfondir'
-            ]
+            keywords: ['quoi', 'pourquoi', 'où', 'quand', 'qui', 'comment'],
+            replies: ['C\'est intéressant', 'Bonne question', 'Je sais pas trop', 'À voir', 'Peut-être']
         },
         affirmation: {
             keywords: ['?'],
-            replies: [
-                'Oui 👍', 'Non', 'Je ne sais pas', 'Peut-être', 'Peut-être bien', 'Pourquoi pas',
-                'C\'est possible', 'Ouais', 'Nope', 'Yep', 'Vraiment pas', 'Sûrement',
-                'Probable', 'Improbable', 'Aucune idée', 'Mystère', 'Question piège',
-                'Dépend du contexte', 'À 50/50', 'Clairement', 'Pas vraiment', 'À peu près',
-                'Je ne suis pas sûr', 'Difficile' , 'Compliqué', 'Mmhhmmm'
-            ]
+            replies: ['Oui 👍', 'Non', 'Je ne sais pas', 'Peut-être', 'Pourquoi pas']
         },
         casual_laugh: {
-            keywords: ['haha', 'lol', 'c\'est drôle', 'mdr', 'marrant', 'rigolo', 'hilarant', 'hahaha', 'xd', 'xdd'],
-            replies: [
-                '😂', 'Haha oui', 'Trop marrant', 'J\'adore haha', 'Tu me fais rire', '😄',
-                'Je crève de rire', 'Stopppp c\'est trop drôle', 'Hahahaha', 'Hehe',
-                'Trop funny', 'Lol sérieusement', 'J\'ai pas pu m\'empêcher', 'Mortel', 'Excellent blague',
-                'T\'es casse-toi déjà', 'Je ris trop', 'Modère ton humour 😂', 'C\'est du vécu',
-                'C\'est fou ce truc', 'Pas elle', 'Classique mais efficace', 'Simple mais efficace',
-                'Tu m\'as tué 😂', 'C\'est méchant haha', 'Je m\'attend pas à ça', 'Genial ta blague'
-            ]
+            keywords: ['haha', 'lol', 'mdr'],
+            replies: ['😂', 'Haha oui', 'Trop marrant', 'J\'adore haha', 'Tu me fais rire']
         },
         planning: {
-            keywords: ['demain', 'ce soir', 'ce weekend', 'prochaine', 'ce week-end', 'demain il', 'on se vendredi', 'plan', 'on fait', 'rendez-vous'],
-            replies: [
-                'Avec plaisir', '✨', 'Super idée', 'Je suis partant', 'Carrément', 'Hâte 🎉',
-                'C\'est in', 'Oki', 'Ouais envoie', 'À quelle heure ?', 'Où ça ?', 'Je viens',
-                'Je vais me libérer', 'J\'arrive', 'Compte sur moi', 'Ça marche', 'C\'est noté',
-                'Je suis motivé', 'Trop cool', 'Enfin !', 'Ça va être dingue', 'Let\'s go',
-                'J\'ai hâte', 'À bientôt alors', 'Amène ta team', 'On amène quoi ?',
-                'Je suis partout', 'Oui oui oui', 'Confirmé', 'Verrouillé', 'On y va'
-            ]
+            keywords: ['demain', 'ce soir', 'weekend', 'plan', 'rendez-vous'],
+            replies: ['Avec plaisir', '✨', 'Super idée', 'Je suis partant', 'Carrément']
         },
         busy_tired: {
-            keywords: ['occupé', 'pris', 'busy', 'pas dispo', 'pas libre', 'j\'ai pas le temps', 'fatigue', 'nuit', 'dormir', 'sommeil', 'fatigué', 'épuisé'],
-            replies: [
-                'Pas grave', 'Pas de souci', 'À plus tard', 'Pas de problème', 'Quand tu as le temps',
-                'Sans pression', 'À bientôt', 'Pas d\'inquiétude', 'On peut attendre', 'Ça peut attendre',
-                'Dors bien !', 'Bonne nuit 😴', 'Repose-toi bien', 'À demain', 'Bon repos',
-                'Dodo bien méritée', 'Dors warrior', 'À demain frérot', 'Zzz...',
-                'Ça va aller', 'Repose-toi', 'On reparle après', 'Pas urgent',
-                'Tu me manques', 'À plus alors', 'Profite de ton temps', 'Reste zen'
-            ]
+            keywords: ['occupé', 'fatigue', 'dormir', 'pas le temps'],
+            replies: ['Pas grave', 'À plus tard', 'Dors bien !', 'Bonne nuit 😴', 'Repose-toi']
         },
         help_request: {
-            keywords: ['aide', 'help', 'peux', 'peux tu', 'peux-tu', 'de l\'aide', 'besoin', 'aide moi', 'tu peux'],
-            replies: [
-                'Bien sûr !', 'Avec plaisir', 'Pas de souci', 'Je suis là', 'Compte sur moi',
-                'Absolument', 'Je viens', 'On y va', 'Envoie', 'Dis moi tout', 'Je t\'écoute',
-                'Qu\'est-ce que je fais ?', 'OK fais moi signe', 'Je suis prêt', 'J\'arrive',
-                'Pas de soucis', 'Je vais t\'aider', 'On peut le faire', 'Ensemble c\'est mieux',
-                'T\'inquiète pas', 'Je suis ton gars/fille', 'On va trouver une solution'
-            ]
+            keywords: ['aide', 'help', 'besoin'],
+            replies: ['Bien sûr !', 'Avec plaisir', 'Je suis là', 'Dis moi tout', 'Qu\'est-ce que je fais ?']
         },
         work_job: {
-            keywords: ['boulot', 'travail', 'job', 'projet', 'mission', 'deadline', 'client', 'code', 'dev', 'bug'],
-            replies: [
-                'Comment ça se passe ?', 'Du nouveau ?', 'Ça avance ?', 'Tu t\'en sors ?', 'Courage !',
-                'Bon courage 💪', 'T\'es un warrior', 'Tu lâches pas', 'C\'est du boulot',
-                'Entre morceaux', 'Bien géré', 'T\'es dans le truc', 'Respire mon gars',
-                'Faut pas craquer', 'Tu vas y arriver', 'C\'est pas si mal', 'Ça va être ouf',
-                'La deadline c\'est quand ?', 'Pas easy', 'Reste focus', 'Power through'
-            ]
+            keywords: ['boulot', 'travail', 'projet', 'deadline'],
+            replies: ['Comment ça se passe ?', 'Ça avance ?', 'Courage !', 'Bon courage 💪']
         },
         family: {
-            keywords: ['famille', 'maman', 'papa', 'enfant', 'bébé', 'mère', 'père', 'frère', 'sœur', 'amour', 'couple'],
-            replies: [
-                'C\'est super', 'Quelle chance', 'C\'est mignon', '🥰', 'Tu as de la chance',
-                'C\'est beau', 'Trop mignon', 'Des news ?', 'Raconte moi', 'Comment vont-ils ?',
-                'Vous êtes chanceux', 'C\'est la vie', 'L\'amour c\'est tout', 'Profite',
-                'C\'est précieux', 'Garde ça précieusement', 'Ça fait rêver',
-                'Comment ils vont ?', 'Des nouvelles ?', 'Donne moi des nouvelles'
-            ]
+            keywords: ['famille', 'maman', 'papa', 'enfant'],
+            replies: ['C\'est super', 'Quelle chance', 'C\'est mignon', '🥰', 'Raconte moi']
         },
         food: {
-            keywords: ['manger', 'food', 'pizza', 'resto', 'cuisine', 'repas', 'faim', 'déjeuner', 'dîner', 'bouffe', 'snack', 'goûter'],
-            replies: [
-                'Avec plaisir !', 'Bonne appétit !', '🍽️', 'C\'est bon !', 'J\'adore', 'Yum yum 😋',
-                'J\'ai faim aussi', 'On va où ?', 'C\'est quoi ton avis ?', 'Épatante l\'idée',
-                'Je valide', 'C\'est l\'heure', 'Excellente idée', 'J\'meurs de faim',
-                'Ça m\'ouvre l\'appétit', 'Tu me donnes envie', 'Super plan',
-                'Miam miam', 'C\'est tentant', 'Merci mais j\'ai pas faim', 'Cool plan'
-            ]
+            keywords: ['manger', 'pizza', 'resto', 'faim'],
+            replies: ['Avec plaisir !', 'Bonne appétit !', '🍽️', 'J\'adore', 'Yum yum 😋']
         },
         sports: {
-            keywords: ['sport', 'match', 'foot', 'tennis', 'courir', 'gym', 'fit', 'training', 'séance', 'muscu'],
-            replies: [
-                'Bien joué !', 'Bravo 🎉', 'T\'as gagné ?', 'Cool !', 'Courage champion', '💪',
-                'Gg wp', 'Je suis fier', 'T\'es un beast', 'Incroyable', 'Quel athlète',
-                'Continue comme ça', 'T\'es au top', 'Je peux pas suivre', 'T\'es trop fort',
-                'J\'allais te dire', 'C\'est fou', 'T\'es fou', 'Dingue ces stats'
-            ]
+            keywords: ['sport', 'match', 'foot', 'gym'],
+            replies: ['Bien joué !', 'Bravo 🎉', 'Cool !', 'Courage champion', '💪']
         },
         weather: {
-            keywords: ['pluie', 'soleil', 'météo', 'weather', 'froid', 'chaud', 'beau', 'temps', 'nuage', 'neige'],
-            replies: [
-                'Quel temps 😞', 'Il pleut pour toi aussi ?', 'C\'est horrible', 'Pas ouf',
-                'C\'est magnifique', 'Parfait', 'Superbe journée', 'À profiter dehors',
-                'Pas terrible', 'Peut-être ça change', 'Pas d\'chance', 'L\'automne/été',
-                'C\'est la saison', 'Froid non ?', 'Beau dehors', 'Bien agréable'
-            ]
+            keywords: ['pluie', 'soleil', 'météo', 'froid', 'chaud'],
+            replies: ['Quel temps 😞', 'C\'est magnifique', 'Parfait', 'Superbe journée']
         },
         movie_music: {
-            keywords: ['film', 'musique', 'chanson', 'série', 'show', 'théâtre', 'concert', 'artiste', 'album'],
-            replies: [
-                'J\'adore ce truc', 'T\'as bon goût', 'Excellent choix', 'À voir/écouter',
-                'Je recommande', 'Pas mal hein', 'C\'est du lourd', 'Ça déchire',
-                'Génial comme film/chanson', 'Je vais checker', 'Ajoute à ma liste', 'Je suis fan aussi',
-                'Bonne recommandation', 'Je vérifierais', 'C\'est sympa'
-            ]
+            keywords: ['film', 'musique', 'chanson', 'série'],
+            replies: ['J\'adore ce truc', 'T\'as bon goût', 'Excellent choix', 'À voir/écouter']
         },
         travel: {
-            keywords: ['voyage', 'vacances', 'trip', 'pays', 'visite', 'tourisme', 'destination', 'expédition'],
-            replies: [
-                'Tres cool', 'Tu as de la chance', 'J\'aimerais bien', 'Envoie des photos',
-                'Raconte tout', 'C\'est ouf', 'Dément', 'Je suis jaloux', 'À quand mon tour',
-                'Reviens vite', 'Profite bien', 'C\'est de rêve',
-                'Quelle destination ?', 'Combien de temps ?', 'À quoi ça ressemble ?'
-            ]
+            keywords: ['voyage', 'vacances', 'pays'],
+            replies: ['Tres cool', 'Tu as de la chance', 'J\'aimerais bien', 'Envoie des photos']
         },
         money: {
-            keywords: ['argent', 'prix', 'coût', 'payer', 'budget', 'investir', 'vendre', 'acheter'],
-            replies: [
-                'C\'est dingue', 'Trop cher', 'Bon prix', 'Ça vaut le coup', 'À voir',
-                'J\'peux pas', 'Trop chaud pour moi', 'Peut-être plus tard', 'Ça m\'intéresse',
-                'C\'est l\'affaire du siècle', 'Pas idée'
-            ]
+            keywords: ['argent', 'prix', 'payer'],
+            replies: ['C\'est dingue', 'Trop cher', 'Bon prix', 'Ça vaut le coup']
         },
         tech: {
-            keywords: ['code', 'tech', 'app', 'bug', 'dev', 'server', 'crash', 'programme', 'software', 'system'],
-            replies: [
-                'Ça marche ?', 'Ça bugue ?', 'T\'as un truc ?', 'L\'informatique c\'est fou',
-                'C\'est de la magie noire', 'Ça me dépasse', 'T\'es un génie', 'On appelle un techno',
-                'Essaye de redémarrer', 'C\'est de l\'ésotérisme', 'J\'y comprends rien',
-                'Ouais tech', 'C\'est complexe'
-            ]
+            keywords: ['code', 'tech', 'bug', 'app'],
+            replies: ['Ça marche ?', 'Ça bugue ?', 'T\'as un truc ?', 'L\'informatique c\'est fou']
         },
         learning: {
-            keywords: ['école', 'examen', 'apprendre', 'étude', 'étudiant', 'université', 'classe', 'leçon'],
-            replies: [
-                'C\'est cool', 'Tu as de la chance', 'Bon courage', 'À bientôt les résultats',
-                'Je croise les doigts', 'Tu vas assurer', 'T\'es un boss', 'L\'éducation c\'est l\'avenir',
-                'Laisse pas tomber', 'Tu peux le faire', 'Ton futur c\'est lumineux'
-            ]
+            keywords: ['école', 'examen', 'apprendre'],
+            replies: ['C\'est cool', 'Bon courage', 'Tu vas assurer', 'T\'es un boss']
         },
         health: {
-            keywords: ['santé', 'doctor', 'médecin', 'malade', 'maladie', 'virus', 'vaccin', 'blessure', 'douleur'],
-            replies: [
-                'T\'inquiète pas', 'Ça va passer', 'Soigne-toi bien', 'Prends soin de toi',
-                'C\'est pas grave', 'Ça va s\'arranger', 'Repose-toi', 'Vois un doc', 'Courage',
-                'Rétablis-toi vite', 'Fais gaffe à toi'
-            ]
+            keywords: ['santé', 'malade', 'docteur'],
+            replies: ['T\'inquiète pas', 'Ça va passer', 'Soigne-toi bien', 'Prends soin de toi']
         },
         accomplishment: {
-            keywords: ['réussi', 'victoire', 'gagné', 'succès', 'exploit', 'record', 'primé', 'champion', 'won'],
-            replies: [
-                '🎉 Bravo !', 'Félicitations !', 'C\'est fou', 'T\'es le meilleur', 'Excellent',
-                'Je suis fier', 'Gg monster', '🏆', 'Legend status', 'C\'est dingue',
-                'Tu l\'as fait', 'Je valide casiment', 'Respect', 'Masterclass', 'Coup de génie',
-                'Incroyable', 'Trop fort', 'C\'est insane'
-            ]
+            keywords: ['réussi', 'victoire', 'gagné', 'succès'],
+            replies: ['🎉 Bravo !', 'Félicitations !', 'C\'est fou', 'T\'es le meilleur']
         },
         random_support: {
             keywords: [],
-            replies: [
-                '👍', '❤️', '😊', '🔥', '⭐', '✨', 'Cool', 'Nice', 'Oui', 'Ah bon',
-                'Intéressant', 'Je vois', 'D\'accord', 'Pour sûr', 'C\'est vrai', 'À voir',
-                'Possible', 'Probable', 'Sûrement', 'Peut-être', 'Peut-être bien', 'Hehe',
-                'Wa ouf', 'Énorme', 'Massif', 'Dément', 'Surreal', 'Bizarre', 'Chelou',
-                'Fou', 'Foufou', 'Cinglé', 'Débile', 'Débil grave', 'Ahihi', 'Bluffant',
-                'C\'est la', 'Ouep', 'Yup', 'Bien sûr', 'Exact', 'Moi aussi', 'Pareil',
-                'Très bien', 'Plutôt cool', 'Ça va', 'Tout va', 'Sweet', 'Awesome',
-                'Amazing', 'Stunning', 'Ahah', 'Lol', 'Hahaha', 'XD', 'c\'est ouf',
-                'Ça m\'était pas venu à l\'esprit', 'C\'est vrai', 'Tout est possible',
-                'Pas mal', 'Sympa', 'Agréable', 'Plaisant', 'Chouette', 'Gentil', 'Aimable'
-            ]
+            replies: ['👍', '❤️', '😊', '🔥', 'Cool', 'Nice', 'Oui', 'Intéressant', 'D\'accord', 'Pour sûr']
         }
     };
 
-    // Scorer chaque pattern - cherche les correspondances
+    // Scorer chaque pattern de manière optimisée
     const scores = {};
-    Object.entries(patterns).forEach(([category, pattern]) => {
-        let score = 0;
+    for (const [category, pattern] of Object.entries(patterns)) {
         if (pattern.keywords.length === 0) {
-            score = -1; // Fallback à la fin seulement
-        } else {
-            pattern.keywords.forEach(keyword => {
-                if (content.includes(keyword)) score += 2;
-            });
+            scores[category] = -1; // Fallback
+            continue;
+        }
+        let score = 0;
+        for (const keyword of pattern.keywords) {
+            if (content.includes(keyword)) {
+                score += 2;
+                break; // Un match suffit par catégorie pour accélérer
+            }
         }
         if (score > 0) scores[category] = score;
-    });
+    }
 
-    // Trouver les catégories avec les meilleurs scores (top 2-3)
+    // Trouver les catégories avec les meilleurs scores (top 2)
     const sortedScores = Object.entries(scores).sort(([,a], [,b]) => b - a);
-    const topCategories = sortedScores.slice(0, 3).map(([cat]) => cat);
+    const topCategories = sortedScores.slice(0, 2).map(([cat]) => cat);
 
     // Ajouter des réponses des catégories matchantes
     if (topCategories.length > 0) {
@@ -677,16 +520,36 @@ function generateQuickReplies(lastMessage) {
         replies.push(...patterns.random_support.replies);
     }
 
-    // Mélanger et limiter à 5-8 suggestions
-    const shuffled = replies
-        .filter((r, i, self) => self.indexOf(r) === i) // Dédupliquer
-        .sort(() => Math.random() - 0.5)
-        .slice(0, 8);
+    // Prioriser les réponses et limiter à 4 suggestions
+    const selectedReplies = [];
+    for (const category of topCategories) {
+        for (const reply of patterns[category].replies) {
+            if (!selectedReplies.includes(reply)) {
+                selectedReplies.push(reply);
+                if (selectedReplies.length >= 4) break;
+            }
+        }
+        if (selectedReplies.length >= 4) break;
+    }
 
-    if (shuffled.length === 0) { quickReplies.style.display = 'none'; return; }
+    if (selectedReplies.length < 4) {
+        for (const reply of patterns.random_support.replies) {
+            if (!selectedReplies.includes(reply)) {
+                selectedReplies.push(reply);
+                if (selectedReplies.length >= 4) break;
+            }
+        }
+    }
+
+    if (selectedReplies.length === 0) {
+        quickReplies.style.display = 'none';
+        return;
+    }
+
+    const finalReplies = selectedReplies;
 
     quickReplies.innerHTML = '';
-    shuffled.forEach(reply => {
+    finalReplies.forEach(reply => {
         const btn = document.createElement('button');
         btn.className   = 'quick-reply-btn';
         btn.textContent = reply;
