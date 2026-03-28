@@ -132,12 +132,32 @@ function animateConfetti() {
 }
 
 // ============================================================
-// SUCCESS SCREEN
+// SUCCESS SCREEN + CONNEXION AUTOMATIQUE
 // ============================================================
-function showSuccess() {
+
+/**
+ * Prépare la connexion automatique en stockant les credentials dans localStorage.
+ * app.js les lira au démarrage via checkAutoLogin().
+ */
+function prepareAutoLogin(userId, username, plainPassword) {
+    localStorage.setItem('pending_auto_login', JSON.stringify({
+        userId,
+        username,
+        plainPassword
+    }));
+}
+
+function showSuccess(userId, username, plainPassword) {
+    // Préparer la connexion automatique avant l'animation
+    prepareAutoLogin(userId, username, plainPassword);
+
     successOverlay.classList.add('visible');
     launchConfetti();
-    setTimeout(() => { window.location.href = 'index.html'; }, 2800);
+
+    // Rediriger vers l'app (avec connexion automatique via pending_auto_login)
+    setTimeout(() => {
+        window.location.href = 'index.html';
+    }, 2800);
 }
 
 // ============================================================
@@ -175,7 +195,10 @@ async function register() {
         headers: {
             'Content-Type': 'application/json',
             'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
+            'Authorization': `Bearer ${supabaseKey}`,
+            // Important : on demande à Supabase de retourner le nouvel enregistrement
+            // pour récupérer l'id généré automatiquement
+            'Prefer': 'return=representation'
         },
         body: JSON.stringify({ username, password })
     });
@@ -189,7 +212,29 @@ async function register() {
         return;
     }
 
-    showSuccess();
+    // Récupérer les données du nouvel utilisateur (id, username)
+    const newUsers = await response.json();
+    const newUser  = Array.isArray(newUsers) ? newUsers[0] : newUsers;
+
+    if (!newUser || !newUser.id) {
+        // Si l'id n'est pas retourné (selon la config Supabase), on le récupère
+        const fetchRes = await fetch(
+            `${supabaseUrl}/rest/v1/users?select=id,username&username=eq.${encodeURIComponent(username)}`,
+            { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }
+        );
+        const fetchData = await fetchRes.json();
+        if (fetchData.length > 0) {
+            showSuccess(fetchData[0].id, fetchData[0].username, password);
+        } else {
+            // Fallback : redirection simple sans auto-login
+            successOverlay.classList.add('visible');
+            launchConfetti();
+            setTimeout(() => { window.location.href = 'index.html'; }, 2800);
+        }
+        return;
+    }
+
+    showSuccess(newUser.id, newUser.username, password);
 }
 
 regButton.addEventListener('click', register);

@@ -1080,3 +1080,84 @@ emoji-picker::part(emoji):hover {
         width: 100%;
     }
 }
+/* ============================================
+   INDICATEURS DE STATUT — PRÉSENCE & NON-LUS
+   ============================================ */
+
+/* Pastille de statut affichée à droite du select (utilisateur sélectionné) */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0 4px;
+    margin-left: 6px;
+    flex-shrink: 0;
+    transition: all var(--transition);
+    animation: slideInBadge 0.25s ease both;
+}
+
+/* En ligne : point vert plein */
+.status-pill[data-status="online"] {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent-glow);
+    width: 10px;
+    height: 10px;
+    min-width: 10px;
+    border-radius: 50%;
+    padding: 0;
+    animation: pulseDot 2s ease-in-out infinite, slideInBadge 0.25s ease both;
+}
+
+/* Hors ligne : point gris */
+.status-pill[data-status="offline"] {
+    background: var(--text-muted);
+    width: 10px;
+    height: 10px;
+    min-width: 10px;
+    border-radius: 50%;
+    padding: 0;
+}
+
+/* Messages non lus : badge rouge avec compteur */
+.status-pill[data-status="unread"] {
+    background: var(--danger);
+    color: #fff;
+    box-shadow: 0 0 6px var(--danger-glow);
+    line-height: 14px;
+}
+
+/* Badge total de messages non lus (avant le select, visible dans la barre) */
+.unread-total-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 0 5px;
+    margin-right: 6px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px var(--danger-glow);
+    animation: slideInBadge 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    cursor: default;
+}
+
+/* Repositionnement du wrapper user-selection pour accueillir le badge + la pastille */
+.user-selection {
+    flex-wrap: nowrap;
+}
+
+/* Correctif : .msg-meta.sent créait un conflit avec .message.sent —
+   on utilise .sent-status dans app.js désormais */
+.chat-messages .message .msg-meta.sent-status {
+    opacity: 0.5;
+}
