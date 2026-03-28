@@ -409,11 +409,11 @@ function generateQuickReplies(lastMessage) {
 // ============================================================
 async function generateConversationSummary() {
     if (currentMessages.length < 3) {
-        summaryContent.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px;">Pas assez de messages pour générer un résumé (minimum 3).</p>';
+        summaryContent.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px;">Pas assez de messages.</p>';
         return;
     }
 
-    summaryContent.innerHTML = '<div class="loading">✨ Génération du résumé en cours…</div>';
+    summaryContent.innerHTML = '<div class="loading">✨ Génération du résumé...</div>';
 
     const conversationText = currentMessages.map(msg => {
         const sender = users[msg.id_sent]?.username || 'Inconnu';
@@ -422,38 +422,37 @@ async function generateConversationSummary() {
     }).join('\n');
 
     try {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer TA_CLE_ICI",
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 1000,
-                messages: [{
-                    role: 'user',
-                    content: `Voici une conversation entre plusieurs utilisateurs. Fais un résumé concis et clair en français, en identifiant les points clés, les décisions prises et les éventuelles actions à faire. Utilise des emojis pour rendre le résumé plus lisible.\n\nConversation :\n${conversationText}`
-                }]
+                model: "mistral-small",
+                messages: [
+                    {
+                        role: "user",
+                        content: `Fais un résumé clair avec emojis : ${conversationText}`
+                    }
+                ]
             })
         });
 
         const data = await response.json();
+        const text = data.choices?.[0]?.message?.content || "Résumé indisponible.";
 
-        if (!response.ok) {
-            throw new Error(data.error?.message || 'Erreur API');
-        }
-
-        const text = data.content?.[0]?.text || 'Résumé indisponible.';
-        // Convertir les sauts de ligne en HTML
         const html = text
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
             .replace(/\n/g, '<br>');
 
-        summaryContent.innerHTML = `<h3>📝 Résumé de la conversation</h3><p>${html}</p>`;
+        summaryContent.innerHTML = `<h3>📝 Résumé</h3><p>${html}</p>`;
 
     } catch (e) {
         console.error('Erreur résumé:', e);
-        summaryContent.innerHTML = `<p style="color:var(--danger);">Erreur lors de la génération du résumé : ${e.message}</p>`;
+        summaryContent.innerHTML = `<p style="color:red;">Erreur : ${e.message}</p>`;
     }
 }
 
