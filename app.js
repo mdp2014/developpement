@@ -701,64 +701,6 @@ function generateQuickReplies(lastMessage) {
 }
 
 // ============================================================
-// RÉSUMÉ DE CONVERSATION (Claude API)
-// ============================================================
-async function generateConversationSummary() {
-    if (currentMessages.length < 3) {
-        summaryContent.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px;">Pas assez de messages.</p>';
-        return;
-    }
-
-    summaryContent.innerHTML = '<div class="loading">✨ Génération du résumé...</div>';
-
-    const conversationText = currentMessages.map(msg => {
-        const sender = users[msg.id_sent]?.username || 'Inconnu';
-        const time   = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        return `[${time}] ${sender}: ${msg.content}`;
-    }).join('\n');
-
-    try {
-const response = await fetch("https://toglujtvmslqutjeqmrh.supabase.co/functions/v1/mistral", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json"
-  },
-  body: JSON.stringify({
-    text: conversationText
-  })
-});
-
-const data = await response.json();
-const text = data.choices?.[0]?.message?.content || "Résumé indisponible.";
-
-        const html = text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/\n/g, '<br>');
-
-        summaryContent.innerHTML = `<h3>📝 Résumé</h3><p>${html}</p>`;
-
-    } catch (e) {
-        console.error('Erreur résumé:', e);
-        summaryContent.innerHTML = `<p style="color:red;">Erreur : ${e.message}</p>`;
-    }
-}
-
-summaryButton.addEventListener('click', () => {
-    summaryModal.style.display = 'flex';
-    generateConversationSummary();
-});
-
-closeSummary.addEventListener('click', () => {
-    summaryModal.style.display = 'none';
-});
-
-summaryModal.addEventListener('click', (e) => {
-    if (e.target === summaryModal) summaryModal.style.display = 'none';
-});
-
-// ============================================================
 // ACCUSÉS DE RÉCEPTION
 // ============================================================
 async function markMessagesAsRead() {
