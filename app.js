@@ -422,25 +422,18 @@ async function generateConversationSummary() {
     }).join('\n');
 
     try {
-        const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Authorization": "Bearer wiuVQiBatDSMkcXAPuq3wXTWw1kPYzqG",
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                model: "mistral-small",
-                messages: [
-                    {
-                        role: "user",
-                        content: `Fais un résumé clair avec emojis : ${conversationText}`
-                    }
-                ]
-            })
-        });
+const response = await fetch("https://toglujtvmslqutjeqmrh.supabase.co/functions/v1/mistral", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    text: conversationText
+  })
+});
 
-        const data = await response.json();
-        const text = data.choices?.[0]?.message?.content || "Résumé indisponible.";
+const data = await response.json();
+const text = data.choices?.[0]?.message?.content || "Résumé indisponible.";
 
         const html = text
             .replace(/&/g, '&amp;')
