@@ -487,53 +487,33 @@ function generateQuickReplies(lastMessage) {
         }
     };
 
-    // Scorer chaque pattern de manière optimisée
-    const scores = {};
-    for (const [category, pattern] of Object.entries(patterns)) {
-        if (pattern.keywords.length === 0) {
-            scores[category] = -1; // Fallback
-            continue;
-        }
-        let score = 0;
-        for (const keyword of pattern.keywords) {
-            if (content.includes(keyword)) {
-                score += 2;
-                break; // Un match suffit par catégorie pour accélérer
-            }
-        }
-        if (score > 0) scores[category] = score;
-    }
-
-    // Trouver les catégories avec les meilleurs scores (top 2)
-    const sortedScores = Object.entries(scores).sort(([,a], [,b]) => b - a);
-    const topCategories = sortedScores.slice(0, 2).map(([cat]) => cat);
-
-    // Ajouter des réponses des catégories matchantes
-    if (topCategories.length > 0) {
-        topCategories.forEach(category => {
-            replies.push(...patterns[category].replies);
+    // Optimisation ultime : map des keywords pour recherche instantanée
+    const keywordToCategory = {};
+    Object.entries(patterns).forEach(([category, pattern]) => {
+        pattern.keywords.forEach(keyword => {
+            keywordToCategory[keyword] = category;
         });
-    }
+    });
 
-    // Ajouter des réponses générales de support si pas assez de match
-    if (replies.length < 50) {
-        replies.push(...patterns.random_support.replies);
-    }
-
-    // Prioriser les réponses et limiter à 4 suggestions
-    const selectedReplies = [];
-    for (const category of topCategories) {
-        for (const reply of patterns[category].replies) {
-            if (!selectedReplies.includes(reply)) {
-                selectedReplies.push(reply);
-                if (selectedReplies.length >= 4) break;
-            }
+    // Trouver les catégories matchantes en une passe
+    const matchedCategories = new Set();
+    const words = content.split(/\s+/);
+    words.forEach(word => {
+        if (keywordToCategory[word]) {
+            matchedCategories.add(keywordToCategory[word]);
         }
-        if (selectedReplies.length >= 4) break;
+    });
+
+    // Si pas de match, utiliser random_support
+    if (matchedCategories.size === 0) {
+        matchedCategories.add('random_support');
     }
 
-    if (selectedReplies.length < 4) {
-        for (const reply of patterns.random_support.replies) {
+    // Sélectionner 4 suggestions uniques des catégories matchantes
+    const selectedReplies = [];
+    for (const category of matchedCategories) {
+        if (selectedReplies.length >= 4) break;
+        for (const reply of patterns[category].replies) {
             if (!selectedReplies.includes(reply)) {
                 selectedReplies.push(reply);
                 if (selectedReplies.length >= 4) break;
@@ -546,10 +526,8 @@ function generateQuickReplies(lastMessage) {
         return;
     }
 
-    const finalReplies = selectedReplies;
-
     quickReplies.innerHTML = '';
-    finalReplies.forEach(reply => {
+    selectedReplies.forEach(reply => {
         const btn = document.createElement('button');
         btn.className   = 'quick-reply-btn';
         btn.textContent = reply;
