@@ -425,7 +425,7 @@ async function generateConversationSummary() {
         const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
             method: "POST",
             headers: {
-                "Authorization": "Bearer TA_CLE_ICI",
+                "Authorization": "Bearer wiuVQiBatDSMkcXAPuq3wXTWw1kPYzqG",
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
