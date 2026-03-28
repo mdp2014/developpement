@@ -362,7 +362,7 @@ messageInput.addEventListener('input', () => {
 });
 
 // ============================================================
-// RÉPONSES RAPIDES
+// RÉPONSES RAPIDES — Améliorées avec plus de patterns
 // ============================================================
 function generateQuickReplies(lastMessage) {
     if (!lastMessage || lastMessage.id_sent === currentUserId) {
@@ -370,27 +370,116 @@ function generateQuickReplies(lastMessage) {
         return;
     }
 
-    const content = lastMessage.content.toLowerCase();
+    const content = lastMessage.content.toLowerCase().trim();
     const replies = [];
 
-    if (content.includes('bonjour') || content.includes('salut') || content.includes('hello')) {
-        replies.push('Bonjour ! 👋', 'Salut !', 'Hello !');
-    } else if (content.includes('merci')) {
-        replies.push('De rien !', 'Avec plaisir !', '😊');
-    } else if (content.includes('comment') && (content.includes('vas') || content.includes('allez'))) {
-        replies.push('Très bien merci !', 'Ça va et toi ?', 'Super !');
-    } else if (content.includes('?')) {
-        replies.push('Oui 👍', 'Non', 'Je ne sais pas');
-    } else if (content.includes('ok') || content.includes('d\'accord')) {
-        replies.push('Parfait !', '👍', 'Super !');
+    // Détection des intentions avec patterns enrichis
+    const patterns = {
+        greeting: {
+            keywords: ['bonjour', 'salut', 'hello', 'hi', 'allo', 'coucou', 'yo', 'bonsoir'],
+            replies: ['Bonjour ! 👋', 'Salut !', 'Hello !', 'Coucou !', 'Bonsoir !', 'Ça va ?', 'Hey !']
+        },
+        thanks: {
+            keywords: ['merci', 'merci beaucoup', 'thanks', 'thx', 'merci!', 'merci!!!'],
+            replies: ['De rien !', 'Avec plaisir !', '😊', 'C\'est normal', 'Pas de souci !', 'À bientôt !', 'Heureux de t\'aider']
+        },
+        howareyou: {
+            keywords: ['comment vas', 'comment allez', 'how are', 'ça va', 'tu vas', 'vous allez', 'comment ça', 'comment tu vas'],
+            replies: ['Très bien merci !', 'Ça va et toi ?', 'Super !', 'Pas mal !', 'Tout va bien 😊', 'En forme !', 'Nickel !']
+        },
+        agreement: {
+            keywords: ['ok', 'd\'accord', 'oui', 'yes', 'yep', 'hehe', 'lol', 'sûr', 'certain', 'absolument', 'bien sûr'],
+            replies: ['Parfait !', '👍', 'Super !', 'Génial !', 'D\'accord', 'C\'est bon', 'Entendu', 'Impeccable', '😄']
+        },
+        disagreement: {
+            keywords: ['non', 'no', 'nope', 'pas d\'accord', 'refused', 'refus', 'pas possible', 'vraiment pas', 'certainement pas'],
+            replies: ['D\'accord', 'Pas de souci', 'Compris', 'Sans problème', 'Pas grave', 'Comme tu veux']
+        },
+        apology: {
+            keywords: ['désolé', 'sorry', 'excuse', 'pardon', 'je regrette', 'my bad', 'faute'],
+            replies: ['Pas grave !', 'T\'inquiète pas', 'Aucun souci', 'C\'est oublié', 'On en parle plus', '😊']
+        },
+        love: {
+            keywords: ['t\'aime', 'love', 'adore', 'amo', 'tu es gentil', 'tu es cool'],
+            replies: ['Moi aussi 😊', 'Toi aussi !', 'Tu es cool', 'C\'est gentil', '❤️', 'Pareil 😄']
+        },
+        question_general: {
+            keywords: ['quoi', 'pourquoi', 'lequel', 'laquelle', 'lesquels', 'où', 'quand', 'qui'],
+            replies: ['C\'est intéressant', 'Bonne question', 'Je sais pas trop', 'À voir', 'Peut-être', 'Je vais réfléchir', '🤔']
+        },
+        affirmation: {
+            keywords: ['?'],
+            replies: ['Oui 👍', 'Non', 'Je ne sais pas', 'Peut-être', 'Peut-être bien', 'Pourquoi pas', 'C\'est possible']
+        },
+        casual: {
+            keywords: ['haha', 'lol', 'c\'est drôle', 'mdr', 'marrant', 'rigolo', 'hilarant'],
+            replies: ['😂', 'Haha oui', 'Trop marrant', 'J\'adore haha', 'Tu me fais rire', '😄']
+        },
+        planning: {
+            keywords: ['demain', 'ce soir', 'ce weekend', 'prochaine', 'ce week-end', 'demain il', 'et if', 'on se vend'],
+            replies: ['Avec plaisir', '✨', 'Super idée', 'Je suis partant', 'Carrément', 'Hâte 🎉', 'Samedi ok ?']
+        },
+        busy: {
+            keywords: ['occupé', 'pris', 'busy', 'pas dispo', 'pas libre', 'j\'ai pas le temps'],
+            replies: ['Pas grave', 'Pas de souci', 'À plus tard', 'Pas de problème', 'Quand tu as le temps']
+        },
+        tired: {
+            keywords: ['fatigue', 'nuit', 'dormir', 'sommeil', 'fatigué', 'épuisé', 'mort'],
+            replies: ['Dors bien !', 'Bonne nuit 😴', 'Repose-toi bien', 'À demain', 'Bon repos', 'Bonne nuit zzz']
+        },
+        help: {
+            keywords: ['aide', 'help', 'peux', 'peux tu', 'peux-tu', 'de l\'aide', 'besoin'],
+            replies: ['Bien sûr !', 'Avec plaisir', 'Pas de souci', 'Je suis là', 'Compte sur moi', 'Absolument']
+        },
+        work: {
+            keywords: ['boulot', 'travail', 'job', 'projet', 'mission', 'deadline', 'client'],
+            replies: ['Comment ça se passe ?', 'Du nouveau ?', 'Ça avance ?', 'Tu t\'en sors ?', 'Courage !', 'Bon courage 💪']
+        },
+        family: {
+            keywords: ['famille', 'maman', 'papa', 'enfant', 'bébé', 'mère', 'père', 'frère', 'sœur'],
+            replies: ['C\'est super', 'Quelle chance', 'C\'est mignon', '🥰', 'Tu as de la chance', 'C\'est beau']
+        },
+        food: {
+            keywords: ['manger', 'food', 'pizza', 'resto', 'cuisine', 'repas', 'faim', 'déjeuner', 'dîner'],
+            replies: ['Avec plaisir !', 'Bonne appétit !', '🍽️', 'C\'est bon !', 'J\'adore', 'Yum yum 😋']
+        },
+        sports: {
+            keywords: ['sport', 'match', 'foot', 'tennis', 'courir', 'gym', 'fit'],
+            replies: ['Bien joué !', 'Bravo 🎉', 'T\'as gagné ?', 'Cool !', 'Courage champion', '💪']
+        }
+    };
+
+    // Scorer chaque pattern
+    const scores = {};
+    Object.entries(patterns).forEach(([category, pattern]) => {
+        let score = 0;
+        pattern.keywords.forEach(keyword => {
+            if (content.includes(keyword)) score += 2;
+        });
+        if (score > 0) scores[category] = score;
+    });
+
+    // Trouver la catégorie avec le meilleur score
+    const bestCategory = Object.entries(scores).sort(([,a], [,b]) => b - a)[0]?.[0];
+    
+    if (bestCategory) {
+        replies.push(...patterns[bestCategory].replies);
     } else {
-        replies.push('👍', 'OK', '😊');
+        // Fallback avec réponses neutres polyvalentes
+        replies.push(
+            '👍', 'Oui', 'Non', 'Je sais pas', 'Peut-être',
+            '😊', 'Haha', 'Intéressant', 'D\'accord',
+            'Pour sûr', 'C\'est vrai', 'À voir'
+        );
     }
 
-    if (replies.length === 0) { quickReplies.style.display = 'none'; return; }
+    // Mélanger pour plus de variété et limiter à 5 premières
+    const shuffled = replies.sort(() => Math.random() - 0.5).slice(0, 5);
+
+    if (shuffled.length === 0) { quickReplies.style.display = 'none'; return; }
 
     quickReplies.innerHTML = '';
-    replies.forEach(reply => {
+    shuffled.forEach(reply => {
         const btn = document.createElement('button');
         btn.className   = 'quick-reply-btn';
         btn.textContent = reply;
