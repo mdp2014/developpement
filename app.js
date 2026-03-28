@@ -677,16 +677,36 @@ function generateQuickReplies(lastMessage) {
         replies.push(...patterns.random_support.replies);
     }
 
-    // Mélanger et limiter à 5-8 suggestions
-    const shuffled = replies
-        .filter((r, i, self) => self.indexOf(r) === i) // Dédupliquer
-        .sort(() => Math.random() - 0.5)
-        .slice(0, 8);
+    // Prioriser les réponses et limiter à 4 suggestions
+    const selectedReplies = [];
+    for (const category of topCategories) {
+        for (const reply of patterns[category].replies) {
+            if (!selectedReplies.includes(reply)) {
+                selectedReplies.push(reply);
+                if (selectedReplies.length >= 4) break;
+            }
+        }
+        if (selectedReplies.length >= 4) break;
+    }
 
-    if (shuffled.length === 0) { quickReplies.style.display = 'none'; return; }
+    if (selectedReplies.length < 4) {
+        for (const reply of patterns.random_support.replies) {
+            if (!selectedReplies.includes(reply)) {
+                selectedReplies.push(reply);
+                if (selectedReplies.length >= 4) break;
+            }
+        }
+    }
+
+    if (selectedReplies.length === 0) {
+        quickReplies.style.display = 'none';
+        return;
+    }
+
+    const finalReplies = selectedReplies;
 
     quickReplies.innerHTML = '';
-    shuffled.forEach(reply => {
+    finalReplies.forEach(reply => {
         const btn = document.createElement('button');
         btn.className   = 'quick-reply-btn';
         btn.textContent = reply;
