@@ -7,10 +7,8 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Subtle grid texture layer -->
     <div class="page-grid-overlay"></div>
 
-    <!-- Message de maintenance -->
     <div class="maintenance-banner">
         🚧 La messagerie est en maintenance. Il peut y avoir des bugs. 🚧
     </div>
@@ -37,30 +35,36 @@
     <div class="chat-container">
         <div class="chat-header">
             <h1>💬 <span>Messagerie</span> Instantanée</h1>
-            <button id="summary-button" class="summary-btn" title="Générer un résumé">📝 Résumé</button>
         </div>
+
         <div class="user-selection">
             <label for="user-select">Vers</label>
-            <select id="user-select">
-                <!-- Les options seront ajoutées ici par JavaScript -->
-            </select>
+            <select id="user-select"></select>
         </div>
+
         <!-- Indicateur "en train d'écrire" -->
         <div class="typing-indicator" id="typing-indicator" style="display: none;"></div>
-        
+
         <!-- Réponses rapides suggérées -->
         <div class="quick-replies-container" id="quick-replies" style="display: none;"></div>
-        
-        <div class="chat-messages" id="chat-messages">
-            <!-- Les messages seront affichés ici -->
-        </div>
-        
+
+        <div class="chat-messages" id="chat-messages"></div>
+
+        <!-- Panneau effets voix (injecté par JS, mais déclaré ici pour l'ordre DOM) -->
+        <!-- voice-effects-panel sera injecté par app.js avant voice-locked-bar -->
+
+        <!-- Barre d'enregistrement verrouillé (injectée par app.js) -->
+
+        <!-- Hint slide (injectée par app.js) -->
+
         <div class="chat-input">
             <input type="text" id="message-input" placeholder="Tapez votre message…">
             <button id="emoji-button" class="icon-button emoji-button" title="Insérer un emoji">😊</button>
+            <!-- #voice-record-btn injecté ici par app.js -->
+            <!-- #font-button injecté ici par app.js -->
             <button id="send-button">Envoyer</button>
         </div>
-        
+
         <div id="upload-progress" class="upload-progress" style="display: none;"></div>
     </div>
 
@@ -69,17 +73,6 @@
         <emoji-picker></emoji-picker>
     </div>
 
-    <!-- Summary Modal -->
-    <div id="summary-modal" class="modal" style="display: none;">
-        <div class="modal-content">
-            <span class="close-modal" id="close-summary">&times;</span>
-            <div id="summary-content">
-                <div class="loading">Chargement...</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Script avec type module pour support des imports -->
     <script type="module" src="app.js"></script>
 </body>
 </html>
