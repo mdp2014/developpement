@@ -36,6 +36,38 @@ let usersWithUnread = new Map();
 let heartbeatInterval = null;
 let presenceInterval  = null;
 
+// ============================================================
+// OPTIMISATION : Cache géolocalisation
+// ============================================================
+let _geoCache = null;
+let _geoPending = null;
+
+async function getGeolocationCached() {
+    if (_geoCache) return _geoCache;
+    if (_geoPending) return _geoPending;
+    _geoPending = new Promise((resolve, reject) => {
+        if (!navigator.geolocation) { reject(new Error('Non supporté')); return; }
+        navigator.geolocation.getCurrentPosition(
+            p => {
+                _geoCache = { latitude: p.coords.latitude, longitude: p.coords.longitude };
+                _geoPending = null;
+                resolve(_geoCache);
+            },
+            err => { _geoPending = null; reject(err); },
+            { timeout: 3000, maximumAge: 300000 } // cache 5 min côté navigateur
+        );
+    });
+    return _geoPending;
+}
+
+async function getCityFromCoordinates(lat, lon) {
+    try {
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+        const d = await r.json();
+        return d.address?.city || d.address?.town || d.address?.village || null;
+    } catch { return null; }
+}
+
 const SESSION_STORAGE_KEY       = 'persistent_session_v1';
 const SESSION_DURATION_MS       = 1000 * 60 * 60 * 24 * 30;
 const SESSION_CHECK_INTERVAL_MS = 1000 * 60 * 5;
@@ -67,9 +99,9 @@ let pausedDuration     = 0;
 let pauseStartTime     = null;
 let ambianceNodes      = [];
 
-const PRESS_DURATION_MS = 400;
-const SLIDE_CANCEL_PX   = -60;
-const SLIDE_LOCK_PY     = -50;
+const PRESS_DURATION_MS  = 400;
+const SLIDE_CANCEL_PX    = -60;
+const SLIDE_LOCK_PY      = -50;
 const MAX_VOICE_DURATION = 120;
 
 const VOICE_EFFECTS = {
@@ -323,6 +355,8 @@ async function restoreSession() {
     connectedUsername.textContent  = session.username;
     await requestNotificationPermission();
     getMessages(); refreshMessages(); startSessionValidation(); startPresence();
+    // Préchauffage géoloc en arrière-plan
+    getGeolocationCached().catch(() => {});
     return true;
 }
 
@@ -394,7 +428,7 @@ function updatePresenceUI_display() {
     }
 }
 
-async function refreshPresence() { await fetchOnlineUsers(); await fetchUnreadByUser(); updatePresenceUI_display(); }
+async function refreshPresence() { await Promise.all([fetchOnlineUsers(), fetchUnreadByUser()]); updatePresenceUI_display(); }
 function startPresence() { stopPresence(); sendHeartbeat(); heartbeatInterval = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS); refreshPresence(); presenceInterval = setInterval(refreshPresence, 5000); }
 function stopPresence()  { if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; } if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; } }
 function clearPresenceUI() {
@@ -480,23 +514,6 @@ async function getUsers() {
 }
 
 // ============================================================
-// GÉOLOCALISATION
-// ============================================================
-function getGeolocation() {
-    return new Promise((resolve, reject) => {
-        if (!navigator.geolocation) { reject(new Error('Non supporté')); return; }
-        navigator.geolocation.getCurrentPosition(p => resolve({ latitude: p.coords.latitude, longitude: p.coords.longitude }), reject);
-    });
-}
-async function getCityFromCoordinates(lat, lon) {
-    try {
-        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
-        const d = await r.json();
-        return d.address?.city || d.address?.town || d.address?.village || null;
-    } catch { return null; }
-}
-
-// ============================================================
 // TYPING INDICATOR
 // ============================================================
 async function updateTypingStatus(isTypingNow) {
@@ -546,7 +563,6 @@ messageInput.addEventListener('input', e => {
 function generateQuickReplies(lastMessage) {
     if (!lastMessage || lastMessage.id_sent === currentUserId) { quickReplies.style.display = 'none'; return; }
     const content = lastMessage.content.toLowerCase().trim();
-    // Ne pas afficher si c'est un message vocal
     if (content.startsWith('{"type":"__voice__"')) { quickReplies.style.display = 'none'; return; }
     if (content.length < 3) { quickReplies.style.display = 'none'; return; }
     const patterns = {
@@ -664,7 +680,6 @@ function createVoiceMessagePlayer(voiceData, isSent) {
     speedBtn.className = 'vmp-speed-btn';
     speedBtn.textContent = '1x';
 
-    // Badge effet (si pas normal)
     if (voiceData.effect && voiceData.effect !== 'normal') {
         const effectBadge = document.createElement('span');
         effectBadge.className = 'vmp-effect-badge';
@@ -680,7 +695,6 @@ function createVoiceMessagePlayer(voiceData, isSent) {
     const audio = new Audio(voiceData.data || voiceData.url);
     let playbackRate = 1, isPlaying = false, animId = null;
 
-    // Waveform statique
     const waveData = generateStaticWaveform(voiceData.duration || 10, 160);
     setTimeout(() => drawStaticWaveform(canvas, waveData, 0, isSent), 60);
 
@@ -895,7 +909,6 @@ function cleanupVoiceRecording() {
     hideVoiceSlideIndicator();
 }
 
-// Minuterie
 function startVoiceTimer() {
     clearInterval(recordingTimer);
     recordingTimer = setInterval(() => {
@@ -910,7 +923,6 @@ function startVoiceTimer() {
     }, 500);
 }
 
-// Forme d'onde temps réel
 function startVoiceWaveform() {
     cancelAnimationFrame(waveformAnimId);
     const canvas = document.getElementById('vlb-waveform-canvas');
@@ -935,10 +947,8 @@ function startVoiceWaveform() {
     draw();
 }
 
-// Traitement et envoi
 async function processAndSendVoice(blob, mimeType, durationSeconds) {
     let processedBlob = blob;
-
     if (voiceEffect !== 'normal') {
         try { processedBlob = await applyVoiceEffectDSP(blob); } catch { processedBlob = blob; }
     }
@@ -962,7 +972,6 @@ async function processAndSendVoice(blob, mimeType, durationSeconds) {
     await sendMessage(currentUserId, voicePayload);
 }
 
-// Effet DSP via OfflineAudioContext
 async function applyVoiceEffectDSP(blob) {
     const effect = VOICE_EFFECTS[voiceEffect] || VOICE_EFFECTS.normal;
     const arrayBuffer = await blob.arrayBuffer();
@@ -1007,7 +1016,6 @@ function audioBufferToWav(buffer) {
     return new Blob([ab], { type: 'audio/wav' });
 }
 
-// Ambiances
 function startVoiceAmbianceSound(type) {
     stopVoiceAmbianceSound();
     if (!voiceAudioContext || !type || type === 'none') return;
@@ -1064,7 +1072,6 @@ function injectVoiceUI() {
     const sendBtn       = document.getElementById('send-button');
     if (!chatContainer || !chatInputEl || !sendBtn) return;
 
-    // Panneau effets
     const effectsPanel = document.createElement('div');
     effectsPanel.id = 'voice-effects-panel';
     effectsPanel.innerHTML = `
@@ -1088,7 +1095,6 @@ function injectVoiceUI() {
         </div>`;
     chatContainer.insertBefore(effectsPanel, chatInputEl);
 
-    // Barre verrouillée
     const lockedBar = document.createElement('div');
     lockedBar.id = 'voice-locked-bar';
     lockedBar.innerHTML = `
@@ -1105,7 +1111,6 @@ function injectVoiceUI() {
         </div>`;
     chatContainer.insertBefore(lockedBar, chatInputEl);
 
-    // Hint slide
     const slideHint = document.createElement('div');
     slideHint.id = 'voice-slide-hint';
     slideHint.innerHTML = `
@@ -1114,20 +1119,17 @@ function injectVoiceUI() {
         <span class="hint-lock">↑ Verrouiller</span>`;
     chatContainer.insertBefore(slideHint, chatInputEl);
 
-    // Indicateur slide
     const slideInd = document.createElement('div');
     slideInd.className = 'voice-slide-indicator';
     slideInd.id = 'voice-slide-indicator';
     chatContainer.appendChild(slideInd);
 
-    // Bouton micro
     const micBtn = document.createElement('button');
     micBtn.id = 'voice-record-btn';
     micBtn.title = 'Message vocal (maintenir appuyé)';
     micBtn.innerHTML = '🎙️';
     chatInputEl.insertBefore(micBtn, sendBtn);
 
-    // Bind events
     micBtn.addEventListener('mousedown', onVoicePressStart);
     micBtn.addEventListener('touchstart', onVoicePressStart, { passive: false });
     document.addEventListener('mouseup',   onVoicePressEnd);
@@ -1142,7 +1144,6 @@ function injectVoiceUI() {
         document.getElementById('voice-effects-panel').classList.toggle('visible');
     });
 
-    // Effets
     effectsPanel.querySelectorAll('.voice-chip').forEach(chip => {
         chip.addEventListener('click', () => {
             voiceEffect = chip.dataset.effect;
@@ -1199,8 +1200,18 @@ async function getMessages() {
 
     const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
     currentMessages = data;
+    renderMessages(data);
+    if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (data.length > 0) generateQuickReplies(data[data.length - 1]);
+}
+
+// ============================================================
+// OPTIMISATION : rendu des messages séparé et réutilisable
+// ============================================================
+function renderMessages(data) {
     chatMessages.innerHTML = '';
     let lastDate = null;
+    const fragment = document.createDocumentFragment();
 
     data.forEach(message => {
         const dateObj  = new Date(message.created_at);
@@ -1213,7 +1224,7 @@ async function getMessages() {
         if (msgDate !== lastDate) {
             const el = document.createElement('div');
             el.className = 'date'; el.textContent = msgDate;
-            chatMessages.appendChild(el); lastDate = msgDate;
+            fragment.appendChild(el); lastDate = msgDate;
         }
 
         const msgEl = document.createElement('div');
@@ -1249,34 +1260,141 @@ async function getMessages() {
             del.addEventListener('click', () => deleteMessage(message.id));
             msgEl.appendChild(del);
         }
-        chatMessages.appendChild(msgEl);
+        fragment.appendChild(msgEl);
     });
 
-    if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
-    if (data.length > 0) generateQuickReplies(data[data.length - 1]);
+    chatMessages.appendChild(fragment);
+}
+
+// ============================================================
+// OPTIMISATION : affichage optimiste immédiat
+// ============================================================
+function appendOptimisticMessage(content) {
+    const now = new Date();
+    const msgTime = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    const msgDate = now.toLocaleDateString('fr-FR');
+
+    // Séparateur de date si nécessaire
+    const lastDateEl = chatMessages.querySelector('.date:last-of-type');
+    if (!lastDateEl || lastDateEl.textContent !== msgDate) {
+        const dateEl = document.createElement('div');
+        dateEl.className = 'date'; dateEl.textContent = msgDate;
+        chatMessages.appendChild(dateEl);
+    }
+
+    const voiceData = parseVoiceMessage(content);
+    const msgEl = document.createElement('div');
+    msgEl.classList.add('message', 'sent', 'optimistic');
+    if (voiceData) msgEl.classList.add('voice-msg');
+
+    const senderSpan = document.createElement('span');
+    senderSpan.className = 'msg-sender';
+    senderSpan.textContent = users[currentUserId]?.username || 'Moi';
+
+    const metaSpan = document.createElement('span');
+    metaSpan.className = 'msg-meta';
+    metaSpan.textContent = `${msgTime} · ⏳`;
+
+    msgEl.appendChild(senderSpan);
+
+    if (voiceData) {
+        const player = createVoiceMessagePlayer(voiceData, true);
+        msgEl.appendChild(player);
+    } else {
+        msgEl.appendChild(document.createTextNode(content));
+    }
+
+    msgEl.appendChild(metaSpan);
+    chatMessages.appendChild(msgEl);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return msgEl;
 }
 
 function refreshMessages() {
     if (refreshInterval) clearInterval(refreshInterval);
-    refreshInterval = setInterval(() => { getMessages(); checkTypingStatus(); }, 1000);
+    // OPTIMISATION : getMessages et checkTypingStatus en parallèle
+    refreshInterval = setInterval(() => {
+        Promise.all([getMessages(), checkTypingStatus()]);
+    }, 1000);
 }
 
 // ============================================================
-// ENVOI DE MESSAGES
+// ENVOI DE MESSAGES — Optimisé
 // ============================================================
 async function sendMessage(userId, content) {
-    let latitude = null, longitude = null, city = null;
-    try { const g = await getGeolocation(); latitude = g.latitude; longitude = g.longitude; city = await getCityFromCoordinates(latitude, longitude); } catch {}
-    isTyping = false; clearTimeout(typingTimeout); await updateTypingStatus(false);
+    const isVoice = content.startsWith('{"type":"__voice__"');
+
+    // OPTIMISATION : affichage optimiste immédiat (sauf vocal déjà affiché via player)
+    let optimisticEl = null;
+    if (!isVoice) {
+        optimisticEl = appendOptimisticMessage(content);
+    }
+
+    // Annuler l'indicateur de frappe sans attendre (fire-and-forget)
+    isTyping = false;
+    clearTimeout(typingTimeout);
+    updateTypingStatus(false); // pas de await ici
+
+    // POST immédiat sans attendre la géoloc
+    const postBody = {
+        id_sent:     userId,
+        content:     content,
+        created_at:  new Date().toISOString(),
+        id_received: userSelect.value,
+        read_at:     null,
+        latitude:    null,
+        longitude:   null,
+        city:        null
+    };
+
+    let messageId = null;
     try {
         const r = await fetch(`${supabaseUrl}/rest/v1/messages`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
-            body: JSON.stringify({ id_sent: userId, content, created_at: new Date().toISOString(), id_received: userSelect.value, read_at: null, latitude, longitude, city })
+            headers: {
+                'Content-Type': 'application/json',
+                apikey: supabaseKey,
+                Authorization: `Bearer ${supabaseKey}`,
+                Prefer: 'return=representation'
+            },
+            body: JSON.stringify(postBody)
         });
-        if (r.ok) { getMessages(); return true; }
-        else console.error('sendMessage:', await r.json());
-    } catch (e) { console.error('sendMessage:', e); }
+
+        if (r.ok) {
+            const inserted = await r.json();
+            messageId = Array.isArray(inserted) ? inserted[0]?.id : inserted?.id;
+
+            // Supprimer le message optimiste et recharger
+            if (optimisticEl) optimisticEl.remove();
+            getMessages();
+
+            // Géoloc en arrière-plan : patch si dispo
+            if (messageId) {
+                getGeolocationCached().then(async geo => {
+                    const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
+                    if (!city && !geo.latitude) return;
+                    fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            apikey: supabaseKey,
+                            Authorization: `Bearer ${supabaseKey}`,
+                            Prefer: 'return=minimal'
+                        },
+                        body: JSON.stringify({ latitude: geo.latitude, longitude: geo.longitude, city })
+                    }).catch(() => {});
+                }).catch(() => {});
+            }
+
+            return true;
+        } else {
+            console.error('sendMessage:', await r.json());
+            if (optimisticEl) optimisticEl.remove();
+        }
+    } catch (e) {
+        console.error('sendMessage:', e);
+        if (optimisticEl) optimisticEl.remove();
+    }
     return false;
 }
 
@@ -1284,9 +1402,13 @@ async function handleSend() {
     if (!currentUserId) { alert('Veuillez vous connecter pour envoyer un message'); return; }
     const content = messageInput.value.trim();
     if (!content) return;
-    messageInput.value = ''; messageInput.focus();
+
+    // Vider l'input immédiatement pour feedback instantané
+    messageInput.value = '';
+    messageInput.focus();
     quickReplies.style.display = 'none';
     rawInputText = ''; prevConvertedValue = '';
+
     await sendMessage(currentUserId, content);
 }
 
@@ -1304,6 +1426,8 @@ async function completeLogin(user, plainPassword) {
     connectedUsername.textContent  = user.username;
     saveSession({ userId: user.id, username: user.username, plainPassword, refreshToken: generateRefreshToken(), issuedAt: Date.now(), expiresAt: Date.now() + SESSION_DURATION_MS, lastValidatedAt: Date.now() });
     await getUsers(); getMessages(); refreshMessages(); startSessionValidation(); startPresence();
+    // Préchauffage géoloc en arrière-plan dès la connexion
+    getGeolocationCached().catch(() => {});
 }
 
 async function login() {
@@ -1355,6 +1479,8 @@ async function logout(options = {}) {
     currentMessages = []; lastMessageCount = 0;
     typingIndicator.style.display = 'none';
     quickReplies.style.display    = 'none';
+    // Réinitialiser le cache géoloc à la déconnexion
+    _geoCache = null; _geoPending = null;
     if (!silent && reason) alert(reason);
 }
 
@@ -1363,14 +1489,13 @@ logoutButton.addEventListener('click', () => logout());
 loginPassword.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); login(); } });
 
 // ============================================================
-// INJECTION DES BOUTONS DANS LA BARRE DE SAISIE
+// INJECTION DES BOUTONS
 // ============================================================
 function injectChatInputButtons() {
     const chatInput = document.querySelector('.chat-input');
     const sendBtn   = document.getElementById('send-button');
     if (!chatInput || !sendBtn) return;
 
-    // Bouton Font
     const fontBtn = document.createElement('button');
     fontBtn.id = 'font-button'; fontBtn.className = 'icon-button font-button';
     fontBtn.textContent = '🔤'; fontBtn.title = 'Style de texte'; fontBtn.type = 'button';
