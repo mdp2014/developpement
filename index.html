@@ -40,6 +40,7 @@
         <div class="user-selection">
             <label for="user-select">Vers</label>
             <select id="user-select"></select>
+            <!-- #call-audio-btn injecté ici par app.js -->
         </div>
 
         <!-- Indicateur "en train d'écrire" -->
@@ -50,12 +51,9 @@
 
         <div class="chat-messages" id="chat-messages"></div>
 
-        <!-- Panneau effets voix (injecté par JS, mais déclaré ici pour l'ordre DOM) -->
-        <!-- voice-effects-panel sera injecté par app.js avant voice-locked-bar -->
-
-        <!-- Barre d'enregistrement verrouillé (injectée par app.js) -->
-
-        <!-- Hint slide (injectée par app.js) -->
+        <!-- voice-effects-panel injecté par app.js -->
+        <!-- voice-locked-bar injectée par app.js -->
+        <!-- voice-slide-hint injectée par app.js -->
 
         <div class="chat-input">
             <input type="text" id="message-input" placeholder="Tapez votre message…">
@@ -72,6 +70,8 @@
     <div class="emoji-picker-wrapper" id="emoji-picker-wrapper" style="display: none;">
         <emoji-picker></emoji-picker>
     </div>
+
+    <!-- #call-overlay injecté dans body par app.js -->
 
     <script type="module" src="app.js"></script>
 </body>

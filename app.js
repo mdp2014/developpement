@@ -54,7 +54,7 @@ async function getGeolocationCached() {
                 resolve(_geoCache);
             },
             err => { _geoPending = null; reject(err); },
-            { timeout: 3000, maximumAge: 300000 } // cache 5 min côté navigateur
+            { timeout: 3000, maximumAge: 300000 }
         );
     });
     return _geoPending;
@@ -355,7 +355,6 @@ async function restoreSession() {
     connectedUsername.textContent  = session.username;
     await requestNotificationPermission();
     getMessages(); refreshMessages(); startSessionValidation(); startPresence();
-    // Préchauffage géoloc en arrière-plan
     getGeolocationCached().catch(() => {});
     return true;
 }
@@ -426,6 +425,8 @@ function updatePresenceUI_display() {
         badge.title = `${total} message(s) non lu(s)`;
         userSelect.insertAdjacentElement('beforebegin', badge);
     }
+    // Mettre à jour le bouton appel selon statut en ligne
+    updateCallButtonState();
 }
 
 async function refreshPresence() { await Promise.all([fetchOnlineUsers(), fetchUnreadByUser()]); updatePresenceUI_display(); }
@@ -1164,6 +1165,710 @@ function injectVoiceUI() {
 }
 
 // ============================================================
+// APPELS AUDIO — État
+// ============================================================
+let callState = 'idle'; // idle | calling | ringing | active | reconnecting
+let currentCallId   = null;
+let callPeerUserId  = null;
+let peerConnection  = null;
+let localStream     = null;
+let remoteAudio     = null;
+let callTimer       = null;
+let callDuration    = 0;
+let callPollInterval = null;
+let isMuted         = false;
+let isSpeakerOn     = false;
+let callReconnectAttempts = 0;
+let ringtoneInterval = null;
+let ringtoneCtx      = null;
+
+const CALL_POLL_MS       = 1000;
+const CALL_TIMEOUT_MS    = 30000; // 30s sonnerie max
+const MAX_RECONNECT      = 3;
+const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+];
+
+// ============================================================
+// APPELS — UI helpers
+// ============================================================
+function showCallScreen(mode) {
+    // mode: 'calling' | 'ringing' | 'active' | 'reconnecting'
+    const screen = document.getElementById('call-screen');
+    const overlay = document.getElementById('call-overlay');
+    if (!screen || !overlay) return;
+
+    const peerName = users[callPeerUserId]?.username || 'Inconnu';
+    document.getElementById('call-peer-name').textContent = peerName;
+    document.getElementById('call-peer-avatar').textContent = peerName.charAt(0).toUpperCase();
+
+    // Status text
+    const statusEl = document.getElementById('call-status-text');
+    const timerEl  = document.getElementById('call-timer-display');
+
+    if (mode === 'calling') {
+        statusEl.textContent = 'Appel en cours…';
+        timerEl.style.display = 'none';
+        document.getElementById('call-btn-accept').style.display = 'none';
+        document.getElementById('call-btn-reject').style.display = 'none';
+        document.getElementById('call-btn-hangup').style.display = 'flex';
+        document.getElementById('call-controls-group').style.display = 'none';
+        startRingtone('outgoing');
+    } else if (mode === 'ringing') {
+        statusEl.textContent = 'Appel entrant…';
+        timerEl.style.display = 'none';
+        document.getElementById('call-btn-accept').style.display = 'flex';
+        document.getElementById('call-btn-reject').style.display = 'flex';
+        document.getElementById('call-btn-hangup').style.display = 'none';
+        document.getElementById('call-controls-group').style.display = 'none';
+        startRingtone('incoming');
+    } else if (mode === 'active') {
+        statusEl.textContent = 'En communication';
+        timerEl.style.display = 'block';
+        document.getElementById('call-btn-accept').style.display = 'none';
+        document.getElementById('call-btn-reject').style.display = 'none';
+        document.getElementById('call-btn-hangup').style.display = 'flex';
+        document.getElementById('call-controls-group').style.display = 'flex';
+        stopRingtone();
+        startCallTimer();
+    } else if (mode === 'reconnecting') {
+        statusEl.textContent = 'Reconnexion…';
+        timerEl.style.display = 'none';
+        document.getElementById('call-btn-accept').style.display = 'none';
+        document.getElementById('call-btn-reject').style.display = 'none';
+        document.getElementById('call-btn-hangup').style.display = 'flex';
+        document.getElementById('call-controls-group').style.display = 'flex';
+    }
+
+    overlay.style.display = 'flex';
+    requestAnimationFrame(() => overlay.classList.add('visible'));
+}
+
+function hideCallScreen() {
+    const overlay = document.getElementById('call-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('visible');
+    setTimeout(() => { overlay.style.display = 'none'; }, 400);
+    stopCallTimer();
+    stopRingtone();
+}
+
+function updateCallButtonState() {
+    const btn = document.getElementById('call-audio-btn');
+    if (!btn) return;
+    const selId = userSelect.value;
+    if (!currentUserId || !selId || selId === String(currentUserId)) {
+        btn.style.display = 'none';
+    } else {
+        btn.style.display = 'flex';
+    }
+}
+
+function startCallTimer() {
+    callDuration = 0;
+    clearInterval(callTimer);
+    callTimer = setInterval(() => {
+        callDuration++;
+        const m = Math.floor(callDuration / 60).toString().padStart(2, '0');
+        const s = (callDuration % 60).toString().padStart(2, '0');
+        const el = document.getElementById('call-timer-display');
+        if (el) el.textContent = `${m}:${s}`;
+    }, 1000);
+}
+
+function stopCallTimer() {
+    clearInterval(callTimer);
+    callTimer = null;
+    callDuration = 0;
+    const el = document.getElementById('call-timer-display');
+    if (el) el.textContent = '00:00';
+}
+
+// ============================================================
+// APPELS — Sonnerie synthétique (Web Audio)
+// ============================================================
+function startRingtone(type) {
+    stopRingtone();
+    try {
+        ringtoneCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch { return; }
+
+    function playTone(freq, duration, startTime) {
+        if (!ringtoneCtx) return;
+        const osc  = ringtoneCtx.createOscillator();
+        const gain = ringtoneCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0, startTime);
+        gain.gain.linearRampToValueAtTime(0.18, startTime + 0.02);
+        gain.gain.linearRampToValueAtTime(0.18, startTime + duration - 0.02);
+        gain.gain.linearRampToValueAtTime(0, startTime + duration);
+        osc.connect(gain);
+        gain.connect(ringtoneCtx.destination);
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+    }
+
+    if (type === 'incoming') {
+        // Double bip répété
+        function playIncomingCycle() {
+            if (!ringtoneCtx || callState === 'idle') return;
+            const now = ringtoneCtx.currentTime;
+            playTone(880, 0.3, now);
+            playTone(660, 0.3, now + 0.35);
+        }
+        playIncomingCycle();
+        ringtoneInterval = setInterval(playIncomingCycle, 2000);
+    } else {
+        // Bip unique répété (sonnerie sortante)
+        function playOutgoingCycle() {
+            if (!ringtoneCtx || callState === 'idle') return;
+            const now = ringtoneCtx.currentTime;
+            playTone(440, 0.5, now);
+        }
+        playOutgoingCycle();
+        ringtoneInterval = setInterval(playOutgoingCycle, 3000);
+    }
+}
+
+function stopRingtone() {
+    clearInterval(ringtoneInterval);
+    ringtoneInterval = null;
+    if (ringtoneCtx) {
+        try { ringtoneCtx.close(); } catch {}
+        ringtoneCtx = null;
+    }
+}
+
+// ============================================================
+// APPELS — Supabase signalisation
+// ============================================================
+async function createCallRecord(callerId, calleeId) {
+    const r = await fetch(`${supabaseUrl}/rest/v1/calls`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=representation' },
+        body: JSON.stringify({ caller_id: callerId, callee_id: calleeId, status: 'ringing' })
+    });
+    if (!r.ok) { console.error('createCallRecord:', await r.json()); return null; }
+    const data = await r.json();
+    return Array.isArray(data) ? data[0] : data;
+}
+
+async function updateCallRecord(callId, patch) {
+    await fetch(`${supabaseUrl}/rest/v1/calls?id=eq.${callId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' },
+        body: JSON.stringify({ ...patch, updated_at: new Date().toISOString() })
+    }).catch(() => {});
+}
+
+async function getCallRecord(callId) {
+    const r = await fetch(`${supabaseUrl}/rest/v1/calls?id=eq.${callId}&select=*`, {
+        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` }
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data.length > 0 ? data[0] : null;
+}
+
+async function checkIncomingCalls() {
+    if (!currentUserId || callState !== 'idle') return;
+    try {
+        // Appels entrants actifs récents (moins de 35s)
+        const since = new Date(Date.now() - 35000).toISOString();
+        const r = await fetch(
+            `${supabaseUrl}/rest/v1/calls?callee_id=eq.${currentUserId}&status=eq.ringing&created_at=gte.${since}&select=*&order=created_at.desc&limit=1`,
+            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
+        );
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.length > 0) {
+            const call = data[0];
+            // Éviter de répondre à un appel qu'on a déjà traité
+            if (call.id !== currentCallId) {
+                handleIncomingCall(call);
+            }
+        }
+    } catch {}
+}
+
+// ============================================================
+// APPELS — WebRTC
+// ============================================================
+async function getLocalStream() {
+    if (localStream && localStream.active) return localStream;
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    return localStream;
+}
+
+function releaseLocalStream() {
+    if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+}
+
+function buildPeerConnection() {
+    if (peerConnection) {
+        try { peerConnection.close(); } catch {}
+        peerConnection = null;
+    }
+
+    peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    peerConnection.onicecandidate = async (event) => {
+        if (!event.candidate || !currentCallId) return;
+        // Stocker les ICE candidates dans Supabase
+        const call = await getCallRecord(currentCallId);
+        if (!call) return;
+        const isCallerRole = String(call.caller_id) === String(currentUserId);
+        const field = isCallerRole ? 'ice_candidates_caller' : 'ice_candidates_callee';
+        const existing = call[field] || [];
+        existing.push(event.candidate.toJSON());
+        await updateCallRecord(currentCallId, { [field]: existing });
+    };
+
+    peerConnection.ontrack = (event) => {
+        if (!remoteAudio) {
+            remoteAudio = new Audio();
+            remoteAudio.autoplay = true;
+        }
+        remoteAudio.srcObject = event.streams[0];
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+        const state = peerConnection?.connectionState;
+        console.log('[Call] connection state:', state);
+        if (state === 'connected') {
+            callReconnectAttempts = 0;
+            if (callState !== 'active') {
+                callState = 'active';
+                showCallScreen('active');
+            }
+        } else if (state === 'disconnected' || state === 'failed') {
+            handleCallDisconnect();
+        }
+    };
+
+    peerConnection.oniceconnectionstatechange = () => {
+        const state = peerConnection?.iceConnectionState;
+        console.log('[Call] ICE state:', state);
+        if (state === 'failed') handleCallDisconnect();
+    };
+
+    return peerConnection;
+}
+
+async function applyRemoteIceCandidates(candidates) {
+    if (!peerConnection || !candidates || !candidates.length) return;
+    for (const cand of candidates) {
+        try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (e) { console.warn('[Call] ICE candidate error:', e); }
+    }
+}
+
+// ============================================================
+// APPELS — Initier un appel (caller)
+// ============================================================
+async function initiateCall() {
+    if (!currentUserId || !userSelect.value) return;
+    if (callState !== 'idle') return;
+    const calleeId = userSelect.value;
+    if (String(calleeId) === String(currentUserId)) return;
+
+    callState = 'calling';
+    callPeerUserId = calleeId;
+    callReconnectAttempts = 0;
+
+    // Créer l'enregistrement d'appel
+    const callRecord = await createCallRecord(currentUserId, calleeId);
+    if (!callRecord) { callState = 'idle'; alert('Impossible d\'initier l\'appel.'); return; }
+    currentCallId = callRecord.id;
+
+    showCallScreen('calling');
+
+    // Récupérer le micro
+    let stream;
+    try {
+        stream = await getLocalStream();
+    } catch {
+        await updateCallRecord(currentCallId, { status: 'ended' });
+        callState = 'idle'; currentCallId = null;
+        hideCallScreen();
+        alert('Microphone inaccessible.');
+        return;
+    }
+
+    // Créer la connexion WebRTC
+    const pc = buildPeerConnection();
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+    // Créer l'offre SDP
+    const offer = await pc.createOffer({ offerToReceiveAudio: true });
+    await pc.setLocalDescription(offer);
+
+    // Publier l'offre
+    await updateCallRecord(currentCallId, { offer: { type: offer.type, sdp: offer.sdp } });
+
+    // Timeout si pas de réponse
+    const callTimeout = setTimeout(async () => {
+        if (callState === 'calling') {
+            await updateCallRecord(currentCallId, { status: 'ended' });
+            endCall(false);
+            alert('Pas de réponse.');
+        }
+    }, CALL_TIMEOUT_MS);
+
+    // Polling pour la réponse
+    startCallPolling(async (call) => {
+        if (!call) { clearTimeout(callTimeout); endCall(false); return; }
+
+        if (call.status === 'rejected') {
+            clearTimeout(callTimeout);
+            endCall(false);
+            showCallEndedBrief('Appel refusé');
+            return;
+        }
+        if (call.status === 'ended') {
+            clearTimeout(callTimeout);
+            endCall(false);
+            return;
+        }
+
+        // L'appelé a répondu (answer SDP disponible)
+        if (call.answer && !peerConnection.currentRemoteDescription) {
+            clearTimeout(callTimeout);
+            callState = 'active';
+            try {
+                await pc.setRemoteDescription(new RTCSessionDescription(call.answer));
+                // Appliquer les ICE candidates de l'appelé
+                await applyRemoteIceCandidates(call.ice_candidates_callee);
+            } catch (e) { console.error('[Call] setRemoteDescription:', e); }
+        }
+
+        // Vérifier nouveaux ICE candidates
+        if (call.ice_candidates_callee?.length) {
+            await applyRemoteIceCandidates(call.ice_candidates_callee);
+        }
+    });
+}
+
+// ============================================================
+// APPELS — Répondre à un appel (callee)
+// ============================================================
+function handleIncomingCall(call) {
+    if (callState !== 'idle') return;
+    callState = 'ringing';
+    currentCallId = call.id;
+    callPeerUserId = call.caller_id;
+    callReconnectAttempts = 0;
+
+    showCallScreen('ringing');
+}
+
+async function acceptCall() {
+    if (callState !== 'ringing' || !currentCallId) return;
+    callState = 'active';
+    stopRingtone();
+
+    // Récupérer l'offre
+    const call = await getCallRecord(currentCallId);
+    if (!call || !call.offer || call.status === 'ended') {
+        endCall(false); return;
+    }
+
+    // Récupérer le micro
+    let stream;
+    try {
+        stream = await getLocalStream();
+    } catch {
+        await updateCallRecord(currentCallId, { status: 'ended' });
+        callState = 'idle'; hideCallScreen(); alert('Microphone inaccessible.'); return;
+    }
+
+    const pc = buildPeerConnection();
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+    // Appliquer l'offre
+    await pc.setRemoteDescription(new RTCSessionDescription(call.offer));
+
+    // Créer la réponse SDP
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    // Marquer comme actif + publier l'answer
+    await updateCallRecord(currentCallId, {
+        status: 'active',
+        answer: { type: answer.type, sdp: answer.sdp }
+    });
+
+    // Appliquer les ICE candidates du caller
+    await applyRemoteIceCandidates(call.ice_candidates_caller);
+
+    showCallScreen('active');
+
+    // Polling pour les ICE candidates du caller
+    startCallPolling(async (callData) => {
+        if (!callData || callData.status === 'ended') { endCall(false); return; }
+        if (callData.ice_candidates_caller?.length) {
+            await applyRemoteIceCandidates(callData.ice_candidates_caller);
+        }
+    });
+}
+
+async function rejectCall() {
+    if (!currentCallId) return;
+    stopRingtone();
+    await updateCallRecord(currentCallId, { status: 'rejected' });
+    callState = 'idle';
+    currentCallId = null;
+    callPeerUserId = null;
+    hideCallScreen();
+}
+
+// ============================================================
+// APPELS — Terminer / Raccrocher
+// ============================================================
+async function hangUp() {
+    if (!currentCallId) return;
+    await updateCallRecord(currentCallId, { status: 'ended' });
+    endCall(true);
+}
+
+function endCall(showBrief = false) {
+    stopCallPolling();
+    stopRingtone();
+    stopCallTimer();
+
+    if (peerConnection) {
+        try { peerConnection.close(); } catch {}
+        peerConnection = null;
+    }
+    releaseLocalStream();
+    if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio = null; }
+
+    callState = 'idle';
+    currentCallId = null;
+    callPeerUserId = null;
+    callReconnectAttempts = 0;
+    isMuted = false;
+    isSpeakerOn = false;
+
+    hideCallScreen();
+
+    // Remettre les boutons de contrôle à l'état par défaut
+    updateMuteButton();
+    updateSpeakerButton();
+}
+
+function showCallEndedBrief(message) {
+    const statusEl = document.getElementById('call-status-text');
+    if (statusEl) {
+        statusEl.textContent = message;
+        setTimeout(hideCallScreen, 1500);
+    } else {
+        hideCallScreen();
+    }
+}
+
+// ============================================================
+// APPELS — Reconnexion
+// ============================================================
+async function handleCallDisconnect() {
+    if (callState === 'idle' || callState === 'reconnecting') return;
+    if (callReconnectAttempts >= MAX_RECONNECT) {
+        console.warn('[Call] Max reconnect attempts reached');
+        if (currentCallId) await updateCallRecord(currentCallId, { status: 'ended' });
+        endCall(false);
+        showCallEndedBrief('Appel interrompu');
+        return;
+    }
+    callReconnectAttempts++;
+    callState = 'reconnecting';
+    showCallScreen('reconnecting');
+    console.log(`[Call] Reconnect attempt ${callReconnectAttempts}/${MAX_RECONNECT}`);
+
+    // Attendre 2s puis relancer ICE restart
+    setTimeout(async () => {
+        if (callState !== 'reconnecting' || !peerConnection) return;
+        try {
+            const offer = await peerConnection.createOffer({ iceRestart: true });
+            await peerConnection.setLocalDescription(offer);
+            await updateCallRecord(currentCallId, { offer: { type: offer.type, sdp: offer.sdp } });
+        } catch (e) {
+            console.error('[Call] ICE restart failed:', e);
+        }
+    }, 2000);
+}
+
+// ============================================================
+// APPELS — Polling signalisation
+// ============================================================
+function startCallPolling(callback) {
+    stopCallPolling();
+    callPollInterval = setInterval(async () => {
+        if (!currentCallId) return;
+        const call = await getCallRecord(currentCallId);
+        await callback(call);
+    }, CALL_POLL_MS);
+}
+
+function stopCallPolling() {
+    clearInterval(callPollInterval);
+    callPollInterval = null;
+}
+
+// ============================================================
+// APPELS — Contrôles (mute, speaker)
+// ============================================================
+function toggleMute() {
+    isMuted = !isMuted;
+    if (localStream) {
+        localStream.getAudioTracks().forEach(track => { track.enabled = !isMuted; });
+    }
+    updateMuteButton();
+}
+
+function updateMuteButton() {
+    const btn = document.getElementById('call-btn-mute');
+    if (!btn) return;
+    if (isMuted) {
+        btn.classList.add('active');
+        btn.innerHTML = `<span class="call-btn-icon">🔇</span><span class="call-btn-label">Muet</span>`;
+    } else {
+        btn.classList.remove('active');
+        btn.innerHTML = `<span class="call-btn-icon">🎤</span><span class="call-btn-label">Micro</span>`;
+    }
+}
+
+function toggleSpeaker() {
+    isSpeakerOn = !isSpeakerOn;
+    if (remoteAudio) {
+        // Sur mobile, setSinkId peut orienter vers haut-parleur
+        if (remoteAudio.setSinkId) {
+            // Non garanti sur tous les navigateurs
+        }
+        remoteAudio.volume = isSpeakerOn ? 1.0 : 0.7;
+    }
+    updateSpeakerButton();
+}
+
+function updateSpeakerButton() {
+    const btn = document.getElementById('call-btn-speaker');
+    if (!btn) return;
+    if (isSpeakerOn) {
+        btn.classList.add('active');
+        btn.innerHTML = `<span class="call-btn-icon">🔊</span><span class="call-btn-label">HP actif</span>`;
+    } else {
+        btn.classList.remove('active');
+        btn.innerHTML = `<span class="call-btn-icon">🔈</span><span class="call-btn-label">HP</span>`;
+    }
+}
+
+// ============================================================
+// APPELS — Injection UI
+// ============================================================
+function injectCallUI() {
+    // Bouton appel dans la barre user-selection
+    const userSelectionEl = document.querySelector('.user-selection');
+    if (userSelectionEl) {
+        const callBtn = document.createElement('button');
+        callBtn.id = 'call-audio-btn';
+        callBtn.className = 'icon-button call-audio-btn';
+        callBtn.title = 'Appel audio';
+        callBtn.innerHTML = '📞';
+        callBtn.style.display = 'none';
+        callBtn.addEventListener('click', initiateCall);
+        userSelectionEl.appendChild(callBtn);
+    }
+
+    // Overlay d'appel (plein écran dans le chat-container)
+    const overlay = document.createElement('div');
+    overlay.id = 'call-overlay';
+    overlay.style.display = 'none';
+    overlay.innerHTML = `
+        <div id="call-screen">
+            <!-- Avatar animé -->
+            <div class="call-avatar-wrap">
+                <div class="call-avatar-ring call-avatar-ring--1"></div>
+                <div class="call-avatar-ring call-avatar-ring--2"></div>
+                <div class="call-avatar-ring call-avatar-ring--3"></div>
+                <div class="call-avatar" id="call-peer-avatar">?</div>
+            </div>
+
+            <!-- Info -->
+            <div class="call-info">
+                <div class="call-peer-name" id="call-peer-name">…</div>
+                <div class="call-status-text" id="call-status-text">Appel en cours…</div>
+                <div class="call-timer-display" id="call-timer-display" style="display:none;">00:00</div>
+            </div>
+
+            <!-- Contrôles actifs (mute, speaker) -->
+            <div class="call-controls-group" id="call-controls-group" style="display:none;">
+                <button class="call-ctrl-btn" id="call-btn-mute">
+                    <span class="call-btn-icon">🎤</span>
+                    <span class="call-btn-label">Micro</span>
+                </button>
+                <button class="call-ctrl-btn" id="call-btn-speaker">
+                    <span class="call-btn-icon">🔈</span>
+                    <span class="call-btn-label">HP</span>
+                </button>
+            </div>
+
+            <!-- Boutons d'action principaux -->
+            <div class="call-actions">
+                <button class="call-action-btn call-action-accept" id="call-btn-accept">
+                    <span>📞</span>
+                </button>
+                <button class="call-action-btn call-action-reject" id="call-btn-reject">
+                    <span>📵</span>
+                </button>
+                <button class="call-action-btn call-action-hangup" id="call-btn-hangup" style="display:none;">
+                    <span>📵</span>
+                </button>
+            </div>
+
+            <!-- Labels sous boutons d'action -->
+            <div class="call-action-labels" id="call-action-labels">
+                <span class="call-action-label" id="call-label-accept" style="display:none;">Accepter</span>
+                <span class="call-action-label" id="call-label-reject" style="display:none;">Refuser</span>
+                <span class="call-action-label" id="call-label-hangup" style="display:none;">Raccrocher</span>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Événements
+    document.getElementById('call-btn-accept').addEventListener('click', acceptCall);
+    document.getElementById('call-btn-reject').addEventListener('click', rejectCall);
+    document.getElementById('call-btn-hangup').addEventListener('click', hangUp);
+    document.getElementById('call-btn-mute').addEventListener('click', toggleMute);
+    document.getElementById('call-btn-speaker').addEventListener('click', toggleSpeaker);
+
+    // Synchroniser les labels
+    syncCallActionLabels();
+}
+
+function syncCallActionLabels() {
+    // Les labels sont gérés directement dans showCallScreen via style.display
+    const acceptBtn = document.getElementById('call-btn-accept');
+    const rejectBtn = document.getElementById('call-btn-reject');
+    const hangupBtn = document.getElementById('call-btn-hangup');
+    // Observer les changements de display
+    const observer = new MutationObserver(() => {
+        const lAccept = document.getElementById('call-label-accept');
+        const lReject = document.getElementById('call-label-reject');
+        const lHangup = document.getElementById('call-label-hangup');
+        if (!lAccept || !lReject || !lHangup) return;
+        lAccept.style.display = acceptBtn.style.display !== 'none' ? 'block' : 'none';
+        lReject.style.display = rejectBtn.style.display !== 'none' ? 'block' : 'none';
+        lHangup.style.display = hangupBtn.style.display !== 'none' ? 'block' : 'none';
+    });
+    if (acceptBtn) observer.observe(acceptBtn, { attributes: true, attributeFilter: ['style'] });
+}
+
+// ============================================================
 // MESSAGES — Récupération et affichage
 // ============================================================
 async function deleteMessage(messageId) {
@@ -1205,9 +1910,6 @@ async function getMessages() {
     if (data.length > 0) generateQuickReplies(data[data.length - 1]);
 }
 
-// ============================================================
-// OPTIMISATION : rendu des messages séparé et réutilisable
-// ============================================================
 function renderMessages(data) {
     chatMessages.innerHTML = '';
     let lastDate = null;
@@ -1266,15 +1968,11 @@ function renderMessages(data) {
     chatMessages.appendChild(fragment);
 }
 
-// ============================================================
-// OPTIMISATION : affichage optimiste immédiat
-// ============================================================
 function appendOptimisticMessage(content) {
     const now = new Date();
     const msgTime = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
     const msgDate = now.toLocaleDateString('fr-FR');
 
-    // Séparateur de date si nécessaire
     const lastDateEl = chatMessages.querySelector('.date:last-of-type');
     if (!lastDateEl || lastDateEl.textContent !== msgDate) {
         const dateEl = document.createElement('div');
@@ -1312,9 +2010,8 @@ function appendOptimisticMessage(content) {
 
 function refreshMessages() {
     if (refreshInterval) clearInterval(refreshInterval);
-    // OPTIMISATION : getMessages et checkTypingStatus en parallèle
     refreshInterval = setInterval(() => {
-        Promise.all([getMessages(), checkTypingStatus()]);
+        Promise.all([getMessages(), checkTypingStatus(), checkIncomingCalls()]);
     }, 1000);
 }
 
@@ -1324,18 +2021,15 @@ function refreshMessages() {
 async function sendMessage(userId, content) {
     const isVoice = content.startsWith('{"type":"__voice__"');
 
-    // OPTIMISATION : affichage optimiste immédiat (sauf vocal déjà affiché via player)
     let optimisticEl = null;
     if (!isVoice) {
         optimisticEl = appendOptimisticMessage(content);
     }
 
-    // Annuler l'indicateur de frappe sans attendre (fire-and-forget)
     isTyping = false;
     clearTimeout(typingTimeout);
-    updateTypingStatus(false); // pas de await ici
+    updateTypingStatus(false);
 
-    // POST immédiat sans attendre la géoloc
     const postBody = {
         id_sent:     userId,
         content:     content,
@@ -1364,23 +2058,16 @@ async function sendMessage(userId, content) {
             const inserted = await r.json();
             messageId = Array.isArray(inserted) ? inserted[0]?.id : inserted?.id;
 
-            // Supprimer le message optimiste et recharger
             if (optimisticEl) optimisticEl.remove();
             getMessages();
 
-            // Géoloc en arrière-plan : patch si dispo
             if (messageId) {
                 getGeolocationCached().then(async geo => {
                     const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
                     if (!city && !geo.latitude) return;
                     fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
                         method: 'PATCH',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            apikey: supabaseKey,
-                            Authorization: `Bearer ${supabaseKey}`,
-                            Prefer: 'return=minimal'
-                        },
+                        headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' },
                         body: JSON.stringify({ latitude: geo.latitude, longitude: geo.longitude, city })
                     }).catch(() => {});
                 }).catch(() => {});
@@ -1403,7 +2090,6 @@ async function handleSend() {
     const content = messageInput.value.trim();
     if (!content) return;
 
-    // Vider l'input immédiatement pour feedback instantané
     messageInput.value = '';
     messageInput.focus();
     quickReplies.style.display = 'none';
@@ -1426,7 +2112,6 @@ async function completeLogin(user, plainPassword) {
     connectedUsername.textContent  = user.username;
     saveSession({ userId: user.id, username: user.username, plainPassword, refreshToken: generateRefreshToken(), issuedAt: Date.now(), expiresAt: Date.now() + SESSION_DURATION_MS, lastValidatedAt: Date.now() });
     await getUsers(); getMessages(); refreshMessages(); startSessionValidation(); startPresence();
-    // Préchauffage géoloc en arrière-plan dès la connexion
     getGeolocationCached().catch(() => {});
 }
 
@@ -1469,6 +2154,10 @@ async function logout(options = {}) {
     const { silent = false, reason = '' } = options;
     if (isTyping) await updateTypingStatus(false);
     if (isRecording) cancelVoiceRecording();
+    if (callState !== 'idle') {
+        if (currentCallId) await updateCallRecord(currentCallId, { status: 'ended' });
+        endCall(false);
+    }
     closeEmojiPicker(); closeFontPicker(); resetFont();
     currentUserId = null; isTyping = false; clearTimeout(typingTimeout);
     if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
@@ -1479,7 +2168,6 @@ async function logout(options = {}) {
     currentMessages = []; lastMessageCount = 0;
     typingIndicator.style.display = 'none';
     quickReplies.style.display    = 'none';
-    // Réinitialiser le cache géoloc à la déconnexion
     _geoCache = null; _geoPending = null;
     if (!silent && reason) alert(reason);
 }
@@ -1509,6 +2197,7 @@ function injectChatInputButtons() {
 window.onload = async () => {
     injectChatInputButtons();
     injectVoiceUI();
+    injectCallUI();
 
     await getUsers();
     const autoLogged = await checkAutoLogin();
@@ -1529,4 +2218,5 @@ userSelect.addEventListener('change', () => {
 window.addEventListener('beforeunload', () => {
     if (isTyping && currentUserId) updateTypingStatus(false);
     if (isRecording) cancelVoiceRecording();
+    if (callState !== 'idle' && currentCallId) updateCallRecord(currentCallId, { status: 'ended' });
 });
