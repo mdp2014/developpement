@@ -1,8 +1,33 @@
-import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
+/**
+ * app.js — Messagerie Instantanée
+ * Architecture Realtime : zéro polling, WebSocket uniquement.
+ *
+ * CHANGEMENTS CLÉS vs l'ancienne version :
+ *  - Supabase JS client (CDN) → Realtime WebSocket pour messages, typing, présence
+ *  - Plus aucun setInterval pour getMessages / checkTypingStatus / checkIncomingCalls
+ *  - Les messages vocaux (base64) ne sont plus re-téléchargés à chaque tick
+ *  - updateTypingStatus : UPSERT unique au lieu de GET + POST/PATCH
+ *  - markMessagesAsRead : appelé une seule fois à l'ouverture de conv, puis sur événement
+ *  - Présence : canal Supabase Presence natif (heartbeat géré par le serveur WS)
+ *  - Appels WebRTC : polling léger 2 s uniquement pendant un appel actif
+ */
 
-const supabaseUrl = 'https://toglujtvmslqutjeqmrh.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvZ2x1anR2bXNscXV0amVxbXJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1ODg0OTUsImV4cCI6MjA4OTE2NDQ5NX0.uezhrVRl2FTtVRfgXBMAnxcwROUNc91ruVegsyMD38U';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
+// ============================================================
+// CONFIG
+// ============================================================
+const SUPABASE_URL = 'https://toglujtvmslqutjeqmrh.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvZ2x1anR2bXNscXV0amVxbXJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1ODg0OTUsImV4cCI6MjA4OTE2NDQ5NX0.uezhrVRl2FTtVRfgXBMAnxcwROUNc91ruVegsyMD38U';
+
+// Client Supabase officiel — gère le WebSocket Realtime automatiquement
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    realtime: { params: { eventsPerSecond: 10 } }
+});
+
+// ============================================================
+// REFS DOM
+// ============================================================
 const chatMessages       = document.getElementById('chat-messages');
 const messageInput       = document.getElementById('message-input');
 const sendButton         = document.getElementById('send-button');
@@ -20,63 +45,68 @@ const typingIndicator    = document.getElementById('typing-indicator');
 const quickReplies       = document.getElementById('quick-replies');
 const networkIndicator   = document.getElementById('network-indicator');
 
-let users            = {};
+// ============================================================
+// ÉTAT GLOBAL
+// ============================================================
+let users            = {};          // { [id]: { id, username } }
 let currentUserId    = null;
-let refreshInterval  = null;
+let currentMessages  = [];
+let emojiPickerOverlay = null;
+
+// Canaux Realtime actifs
+let msgChannel       = null;        // Canal messages de la conversation en cours
+let typingChannel    = null;        // Canal typing_status
+let presenceChannel  = null;        // Canal présence (Supabase Presence)
+
+// Typing
 let typingTimeout    = null;
 let isTyping         = false;
-let currentMessages  = [];
-let lastMessageCount = 0;
-let emojiPickerOverlay  = null;
-let sessionValidationInterval = null;
 
-// Présence
-let onlineUsers     = new Set();
-let usersWithUnread = new Map();
-let heartbeatInterval = null;
-let presenceInterval  = null;
+// Présence locale
+let onlineUsers      = new Set();
+let usersWithUnread  = new Map();
 
-// ============================================================
-// OPTIMISATION : Cache géolocalisation
-// ============================================================
-let _geoCache = null;
-let _geoPending = null;
+// Session
+const SESSION_KEY    = 'session_v2';
+const SESSION_MS     = 1000 * 60 * 60 * 24 * 30; // 30 jours
 
-async function getGeolocationCached() {
-    if (_geoCache) return _geoCache;
-    if (_geoPending) return _geoPending;
-    _geoPending = new Promise((resolve, reject) => {
-        if (!navigator.geolocation) { reject(new Error('Non supporté')); return; }
-        navigator.geolocation.getCurrentPosition(
-            p => {
-                _geoCache = { latitude: p.coords.latitude, longitude: p.coords.longitude };
-                _geoPending = null;
-                resolve(_geoCache);
-            },
-            err => { _geoPending = null; reject(err); },
-            { timeout: 3000, maximumAge: 300000 }
-        );
-    });
-    return _geoPending;
-}
+// Géolocalisation : cache unique, ne se refait pas à chaque message
+let _geoCache  = null;
+let _geoPend   = null;
 
-async function getCityFromCoordinates(lat, lon) {
-    try {
-        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
-        const d = await r.json();
-        return d.address?.city || d.address?.town || d.address?.village || null;
-    } catch { return null; }
-}
+// Font picker
+let activeFontId        = 'normal';
+let rawInputText        = '';
+let prevConvertedValue  = '';
+let fontPickerOpen      = false;
+let fontPickerEl        = null;
+let fontPickerOverlay   = null;
 
-const SESSION_STORAGE_KEY       = 'persistent_session_v1';
-const SESSION_DURATION_MS       = 1000 * 60 * 60 * 24 * 30;
-const SESSION_CHECK_INTERVAL_MS = 1000 * 60 * 5;
-const ONLINE_THRESHOLD_SECONDS  = 30;
-const HEARTBEAT_INTERVAL_MS     = 15000;
+// Appels WebRTC
+let callState       = 'idle';
+let currentCallId   = null;
+let callPeerUserId  = null;
+let peerConnection  = null;
+let localStream     = null;
+let remoteAudio     = null;
+let callTimer       = null;
+let callDuration    = 0;
+let callPollInterval = null;    // polling UNIQUEMENT pendant un appel (2 s)
+let isMuted         = false;
+let isSpeakerOn     = false;
+let callReconnectAttempts = 0;
+let ringtoneInterval = null;
+let ringtoneCtx      = null;
 
-// ============================================================
-// MESSAGES VOCAUX — État
-// ============================================================
+const CALL_TIMEOUT_MS = 30000;
+const MAX_RECONNECT   = 3;
+const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+];
+
+// Messages vocaux
 let mediaRecorder      = null;
 let audioChunks        = [];
 let recordingStream    = null;
@@ -113,8 +143,21 @@ const VOICE_EFFECTS = {
 };
 
 // ============================================================
-// FONT PICKER — Unicode
+// FONT STYLES — Unicode
 // ============================================================
+const MAPS = {
+    bold:        { upper: 0x1D400, lower: 0x1D41A, digits: 0x1D7CE },
+    italic:      { upper: 0x1D434, lower: 0x1D44E, special: { 'h': '\u210E' } },
+    bold_italic: { upper: 0x1D468, lower: 0x1D482 },
+    script:      { upper: 0x1D4D0, lower: 0x1D4EA, special: { 'B':'\u212C','E':'\u2130','F':'\u2131','H':'\u210B','I':'\u2110','L':'\u2112','M':'\u2133','R':'\u211B','e':'\u212F','g':'\u210A','o':'\u2134' } },
+    double:      { upper: 0x1D538, lower: 0x1D552, digits: 0x1D7D8, special: { 'C':'\u2102','H':'\u210D','N':'\u2115','P':'\u2119','Q':'\u211A','R':'\u211D','Z':'\u2124' } },
+    fraktur:     { upper: 0x1D504, lower: 0x1D51E, special: { 'C':'\u212D','H':'\u210C','I':'\u2111','R':'\u211C','Z':'\u2128' } },
+    mono:        { upper: 0x1D670, lower: 0x1D68A, digits: 0x1D7F6 },
+    bubble:      { upper: 0x24B6,  lower: 0x24D0,  digits: { '0':'⓪','1':'①','2':'②','3':'③','4':'④','5':'⑤','6':'⑥','7':'⑦','8':'⑧','9':'⑨' } },
+    wide:        { upper: 0xFF21,  lower: 0xFF41,  digits: 0xFF10 },
+    small_caps:  { map: { 'a':'ᴀ','b':'ʙ','c':'ᴄ','d':'ᴅ','e':'ᴇ','f':'ꜰ','g':'ɢ','h':'ʜ','i':'ɪ','j':'ᴊ','k':'ᴋ','l':'ʟ','m':'ᴍ','n':'ɴ','o':'ᴏ','p':'ᴘ','q':'ǫ','r':'ʀ','s':'s','t':'ᴛ','u':'ᴜ','v':'ᴠ','w':'ᴡ','x':'x','y':'ʏ','z':'ᴢ' } },
+};
+
 const FONT_STYLES = [
     { id: 'normal',     label: 'Normal',       preview: 'Abc', description: 'Texte standard',     convert: t => t },
     { id: 'bold',       label: '𝐆𝐫𝐚𝐬',        preview: '𝐀𝐁𝐂', description: 'Bold',              convert: t => convertUnicode(t, MAPS.bold) },
@@ -128,19 +171,6 @@ const FONT_STYLES = [
     { id: 'small_caps', label: 'Sᴍᴀʟʟ Cᴀᴘꜱ',  preview: 'Aʙᴄ', description: 'Petites capitales', convert: t => convertUnicode(t, MAPS.small_caps) },
     { id: 'wide',       label: 'Ｗｉｄｅ',       preview: 'ＡＢＣ', description: 'Pleine largeur',   convert: t => convertUnicode(t, MAPS.wide) },
 ];
-
-const MAPS = {
-    bold:        { upper: 0x1D400, lower: 0x1D41A, digits: 0x1D7CE },
-    italic:      { upper: 0x1D434, lower: 0x1D44E, special: { 'h': '\u210E' } },
-    bold_italic: { upper: 0x1D468, lower: 0x1D482 },
-    script:      { upper: 0x1D4D0, lower: 0x1D4EA, special: { 'B':'\u212C','E':'\u2130','F':'\u2131','H':'\u210B','I':'\u2110','L':'\u2112','M':'\u2133','R':'\u211B','e':'\u212F','g':'\u210A','o':'\u2134' } },
-    double:      { upper: 0x1D538, lower: 0x1D552, digits: 0x1D7D8, special: { 'C':'\u2102','H':'\u210D','N':'\u2115','P':'\u2119','Q':'\u211A','R':'\u211D','Z':'\u2124' } },
-    fraktur:     { upper: 0x1D504, lower: 0x1D51E, special: { 'C':'\u212D','H':'\u210C','I':'\u2111','R':'\u211C','Z':'\u2128' } },
-    mono:        { upper: 0x1D670, lower: 0x1D68A, digits: 0x1D7F6 },
-    bubble:      { upper: 0x24B6,  lower: 0x24D0,  digits: { '0':'⓪','1':'①','2':'②','3':'③','4':'④','5':'⑤','6':'⑥','7':'⑦','8':'⑧','9':'⑨' } },
-    wide:        { upper: 0xFF21,  lower: 0xFF41,  digits: 0xFF10 },
-    small_caps:  { map: { 'a':'ᴀ','b':'ʙ','c':'ᴄ','d':'ᴅ','e':'ᴇ','f':'ꜰ','g':'ɢ','h':'ʜ','i':'ɪ','j':'ᴊ','k':'ᴋ','l':'ʟ','m':'ᴍ','n':'ɴ','o':'ᴏ','p':'ᴘ','q':'ǫ','r':'ʀ','s':'s','t':'ᴛ','u':'ᴜ','v':'ᴠ','w':'ᴡ','x':'x','y':'ʏ','z':'ᴢ' } },
-};
 
 function convertUnicode(text, map) {
     if (!text) return text;
@@ -163,15 +193,7 @@ function convertUnicode(text, map) {
     }).join('');
 }
 
-let activeFontId       = 'normal';
-let rawInputText       = '';
-let prevConvertedValue = '';
-let fontPickerOpen     = false;
-let fontPickerEl       = null;
-let fontPickerOverlay  = null;
-
 function getActiveStyle() { return FONT_STYLES.find(s => s.id === activeFontId) || FONT_STYLES[0]; }
-
 function applyFontToInput() {
     const converted = getActiveStyle().convert(rawInputText);
     if (messageInput.value !== converted) {
@@ -180,7 +202,6 @@ function applyFontToInput() {
         try { messageInput.setSelectionRange(s, e); } catch {}
     }
 }
-
 function handleFontInput(ev) {
     if (activeFontId === 'normal') { rawInputText = messageInput.value; prevConvertedValue = messageInput.value; return; }
     const currentValue = messageInput.value;
@@ -212,7 +233,6 @@ function handleFontInput(ev) {
     }
     prevConvertedValue = messageInput.value;
 }
-
 function decodeUnicodeChar(ch, style) {
     if (!ch) return ch;
     const cp  = ch.codePointAt(0);
@@ -228,7 +248,6 @@ function decodeUnicodeChar(ch, style) {
     if (map.special) { const e = Object.entries(map.special).find(([, v]) => v === ch); if (e) return e[0]; }
     return ch;
 }
-
 function openFontPicker() {
     if (fontPickerOpen) { closeFontPicker(); return; }
     fontPickerOpen = true;
@@ -266,7 +285,6 @@ function openFontPicker() {
     });
     document.getElementById('font-button').classList.add('active');
 }
-
 function closeFontPicker() {
     if (!fontPickerOpen) return;
     fontPickerOpen = false;
@@ -274,7 +292,6 @@ function closeFontPicker() {
     if (fontPickerOverlay) { fontPickerOverlay.remove(); fontPickerOverlay = null; }
     document.getElementById('font-button')?.classList.remove('active');
 }
-
 function selectFont(fontId) {
     activeFontId = fontId;
     updateFontButtonState();
@@ -283,7 +300,6 @@ function selectFont(fontId) {
     fontPickerEl?.querySelectorAll('.font-style-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.fontId === fontId));
     messageInput.focus();
 }
-
 function updateFontButtonState() {
     const btn = document.getElementById('font-button');
     if (!btn) return;
@@ -291,7 +307,6 @@ function updateFontButtonState() {
     if (activeFontId === 'normal') { btn.textContent = '🔤'; btn.classList.remove('font-active'); btn.title = 'Style de texte'; }
     else { btn.textContent = style.preview.charAt(0) || '🔤'; btn.classList.add('font-active'); btn.title = `Style : ${style.description}`; }
 }
-
 function resetFont() { activeFontId = 'normal'; rawInputText = ''; prevConvertedValue = ''; updateFontButtonState(); }
 
 // ============================================================
@@ -314,34 +329,25 @@ updateNetworkIndicator();
 // ============================================================
 // SESSION
 // ============================================================
-function generateRefreshToken() {
-    const b = new Uint8Array(32); window.crypto.getRandomValues(b);
-    return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
-}
-function loadSession()  { try { return JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY)); } catch { return null; } }
-function saveSession(s) { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(s)); }
-function clearSession() { localStorage.removeItem(SESSION_STORAGE_KEY); }
-function stopSessionValidation() { if (sessionValidationInterval) { clearInterval(sessionValidationInterval); sessionValidationInterval = null; } }
+function loadSession()  { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } }
+function saveSession(s) { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); }
+function clearSession() { localStorage.removeItem(SESSION_KEY); }
 
 async function validateSession(session) {
     if (!session?.userId || !session?.expiresAt) return false;
     if (Date.now() > session.expiresAt) return false;
     try {
-        const r = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username,password&id=eq.${session.userId}`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const data = await r.json();
-        if (!r.ok || !data.length) return false;
-        if (data[0].password !== session.plainPassword) return false;
-        session.username = data[0].username; session.lastValidatedAt = Date.now(); saveSession(session);
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, username, password')
+            .eq('id', session.userId)
+            .single();
+        if (error || !data) return false;
+        if (data.password !== session.plainPassword) return false;
+        session.username = data.username;
+        saveSession(session);
         return true;
     } catch { return true; }
-}
-
-function startSessionValidation() {
-    stopSessionValidation();
-    sessionValidationInterval = setInterval(async () => {
-        if (!await validateSession(loadSession())) logout({ silent: false, reason: 'Session expirée, veuillez vous reconnecter.' });
-    }, SESSION_CHECK_INTERVAL_MS);
 }
 
 async function restoreSession() {
@@ -350,56 +356,73 @@ async function restoreSession() {
     if (!await validateSession(session)) { clearSession(); return false; }
     currentUserId = session.userId;
     users[session.userId] = { id: session.userId, username: session.username };
-    loginContainer.style.display  = 'none';
-    connectedUser.style.display   = 'flex';
-    connectedUsername.textContent  = session.username;
+    showConnectedUI(session.username);
     await requestNotificationPermission();
-    getMessages(); refreshMessages(); startSessionValidation(); startPresence();
+    await getUsers();
+    await loadInitialMessages();
+    subscribeToConversation();
+    subscribeToTyping();
+    subscribeToPresence();
+    subscribeToIncomingCalls();
     getGeolocationCached().catch(() => {});
     return true;
 }
 
 // ============================================================
-// PRÉSENCE
+// PRÉSENCE — Supabase Presence (WebSocket natif, zéro polling)
 // ============================================================
-async function sendHeartbeat() {
-    if (!currentUserId) return;
-    const now = new Date().toISOString();
-    try {
-        const check = await fetch(`${supabaseUrl}/rest/v1/user_presence?user_id=eq.${currentUserId}&select=user_id`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const rows = await check.json();
-        const method = rows.length > 0 ? 'PATCH' : 'POST';
-        const url    = rows.length > 0 ? `${supabaseUrl}/rest/v1/user_presence?user_id=eq.${currentUserId}` : `${supabaseUrl}/rest/v1/user_presence`;
-        const body   = rows.length > 0 ? { last_seen: now } : { user_id: currentUserId, last_seen: now };
-        await fetch(url, { method, headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' }, body: JSON.stringify(body) });
-    } catch {}
-}
+function subscribeToPresence() {
+    if (presenceChannel) { supabase.removeChannel(presenceChannel); presenceChannel = null; }
 
-async function fetchOnlineUsers() {
-    try {
-        const since = new Date(Date.now() - ONLINE_THRESHOLD_SECONDS * 1000).toISOString();
-        const r = await fetch(`${supabaseUrl}/rest/v1/user_presence?select=user_id&last_seen=gte.${since}`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const data = await r.json();
-        if (r.ok) onlineUsers = new Set(data.map(row => row.user_id));
-    } catch {}
+    presenceChannel = supabase.channel('online-users', {
+        config: { presence: { key: currentUserId } }
+    });
+
+    presenceChannel
+        .on('presence', { event: 'sync' }, () => {
+            const state = presenceChannel.presenceState();
+            onlineUsers = new Set(Object.keys(state));
+            updatePresenceUI();
+        })
+        .on('presence', { event: 'join' }, ({ key }) => {
+            onlineUsers.add(key);
+            updatePresenceUI();
+        })
+        .on('presence', { event: 'leave' }, ({ key }) => {
+            onlineUsers.delete(key);
+            updatePresenceUI();
+        })
+        .subscribe(async (status) => {
+            if (status === 'SUBSCRIBED') {
+                // Track ma présence — Supabase gère le heartbeat automatiquement
+                await presenceChannel.track({ user_id: currentUserId, online_at: new Date().toISOString() });
+                // Calculer les non-lus initiaux
+                await fetchUnreadByUser();
+                updatePresenceUI();
+            }
+        });
 }
 
 async function fetchUnreadByUser() {
     if (!currentUserId) return;
     try {
-        const r = await fetch(`${supabaseUrl}/rest/v1/messages?select=id_sent&id_received=eq.${currentUserId}&read_at=is.null`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const data = await r.json();
-        if (!r.ok) return;
+        // Sélection minimale : uniquement id_sent, pas content
+        const { data, error } = await supabase
+            .from('messages')
+            .select('id_sent')
+            .eq('id_received', currentUserId)
+            .is('read_at', null);
+        if (error) return;
         const map = new Map();
-        data.forEach(msg => { if (msg.id_sent !== userSelect.value) map.set(msg.id_sent, (map.get(msg.id_sent) || 0) + 1); });
+        data.forEach(msg => {
+            if (msg.id_sent !== userSelect.value)
+                map.set(msg.id_sent, (map.get(msg.id_sent) || 0) + 1);
+        });
         usersWithUnread = map;
     } catch {}
 }
 
-function updatePresenceUI_display() {
+function updatePresenceUI() {
     Array.from(userSelect.options).forEach(opt => {
         const uid = opt.value, user = users[uid]; if (!user) return;
         if      (usersWithUnread.has(uid)) opt.textContent = `🔴 ${user.username}`;
@@ -413,29 +436,406 @@ function updatePresenceUI_display() {
         if (selId) {
             const pill = document.createElement('span');
             pill.className = 'status-pill';
-            if (usersWithUnread.has(selId)) { pill.textContent = usersWithUnread.get(selId); pill.dataset.status = 'unread'; pill.title = `${usersWithUnread.get(selId)} message(s) non lu(s)`; wrapper.appendChild(pill); }
-            else if (onlineUsers.has(selId)) { pill.dataset.status = 'online'; pill.title = 'En ligne'; wrapper.appendChild(pill); }
+            if (usersWithUnread.has(selId)) {
+                pill.textContent = usersWithUnread.get(selId);
+                pill.dataset.status = 'unread';
+                pill.title = `${usersWithUnread.get(selId)} message(s) non lu(s)`;
+                wrapper.appendChild(pill);
+            } else if (onlineUsers.has(selId)) {
+                pill.dataset.status = 'online';
+                pill.title = 'En ligne';
+                wrapper.appendChild(pill);
+            }
         }
     }
     document.querySelectorAll('.unread-total-badge').forEach(el => el.remove());
     const total = [...usersWithUnread.values()].reduce((a, b) => a + b, 0);
     if (total > 0) {
         const badge = document.createElement('span');
-        badge.className = 'unread-total-badge'; badge.textContent = total > 99 ? '99+' : total;
+        badge.className = 'unread-total-badge';
+        badge.textContent = total > 99 ? '99+' : total;
         badge.title = `${total} message(s) non lu(s)`;
         userSelect.insertAdjacentElement('beforebegin', badge);
     }
-    // Mettre à jour le bouton appel selon statut en ligne
     updateCallButtonState();
 }
 
-async function refreshPresence() { await Promise.all([fetchOnlineUsers(), fetchUnreadByUser()]); updatePresenceUI_display(); }
-function startPresence() { stopPresence(); sendHeartbeat(); heartbeatInterval = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS); refreshPresence(); presenceInterval = setInterval(refreshPresence, 5000); }
-function stopPresence()  { if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; } if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; } }
 function clearPresenceUI() {
-    Array.from(userSelect.options).forEach(opt => { if (opt.value && users[opt.value]) opt.textContent = users[opt.value].username; });
+    Array.from(userSelect.options).forEach(opt => {
+        if (opt.value && users[opt.value]) opt.textContent = users[opt.value].username;
+    });
     document.querySelectorAll('.status-pill, .unread-total-badge').forEach(el => el.remove());
-    onlineUsers = new Set(); usersWithUnread = new Map();
+    onlineUsers = new Set();
+    usersWithUnread = new Map();
+}
+
+// ============================================================
+// MESSAGES — Chargement initial + Realtime
+// ============================================================
+async function loadInitialMessages() {
+    if (!currentUserId || !userSelect.value) {
+        chatMessages.innerHTML = '';
+        currentMessages = [];
+        return;
+    }
+    // OPTIMISATION : sélection explicite des colonnes, pas select=*
+    // On exclut latitude/longitude (non affichés directement) → on garde city
+    const { data, error } = await supabase
+        .from('messages')
+        .select('id, id_sent, id_received, content, created_at, read_at, city')
+        .or(`and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId})`)
+        .order('created_at', { ascending: true });
+
+    if (error) { console.error('loadInitialMessages:', error); return; }
+
+    currentMessages = data;
+    renderMessages(data);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Marquer comme lus une seule fois à l'ouverture
+    await markMessagesAsRead();
+    await fetchUnreadByUser();
+    updatePresenceUI();
+
+    if (data.length > 0) generateQuickReplies(data[data.length - 1]);
+}
+
+/**
+ * subscribeToConversation — Realtime INSERT/UPDATE sur messages
+ * Remplace intégralement le setInterval(() => getMessages(), 1000)
+ */
+function subscribeToConversation() {
+    if (msgChannel) { supabase.removeChannel(msgChannel); msgChannel = null; }
+    if (!currentUserId || !userSelect.value) return;
+
+    const convFilter = `or(and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId}))`;
+
+    msgChannel = supabase
+        .channel(`conv:${currentUserId}:${userSelect.value}`)
+        .on('postgres_changes', {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'messages',
+            // Filtre côté serveur : uniquement les messages de cette conversation
+            filter: `id_received=eq.${currentUserId}`
+        }, async (payload) => {
+            const msg = payload.new;
+            // Vérifier que c'est bien notre interlocuteur actuel
+            if (msg.id_sent !== userSelect.value) {
+                // Message d'un autre utilisateur : mettre à jour les non-lus seulement
+                usersWithUnread.set(msg.id_sent, (usersWithUnread.get(msg.id_sent) || 0) + 1);
+                updatePresenceUI();
+                return;
+            }
+            // Ajouter le message à la liste locale
+            // On re-fetch uniquement ce message pour avoir toutes ses colonnes (city, etc.)
+            const { data } = await supabase
+                .from('messages')
+                .select('id, id_sent, id_received, content, created_at, read_at, city')
+                .eq('id', msg.id)
+                .single();
+            if (!data) return;
+
+            const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
+            currentMessages.push(data);
+            appendMessageElement(data);
+            if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            // Notification si l'onglet est en arrière-plan
+            if (document.hidden) {
+                const voiceData = parseVoiceMessage(data.content);
+                const preview = voiceData ? '🎙️ Message vocal' : data.content.substring(0, 60);
+                showNotification(`Nouveau message de ${users[data.id_sent]?.username || '?'}`, preview);
+            }
+
+            // Marquer comme lu immédiatement
+            await markMessagesAsRead();
+            await fetchUnreadByUser();
+            updatePresenceUI();
+        })
+        .on('postgres_changes', {
+            // Mise à jour des accusés de lecture sur nos propres messages
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'messages',
+            filter: `id_sent=eq.${currentUserId}`
+        }, (payload) => {
+            const updated = payload.new;
+            // Mettre à jour le message localement sans re-fetch
+            const idx = currentMessages.findIndex(m => m.id === updated.id);
+            if (idx !== -1) {
+                currentMessages[idx] = { ...currentMessages[idx], read_at: updated.read_at };
+                updateMessageReadStatus(updated.id, updated.read_at);
+            }
+        })
+        .subscribe();
+}
+
+/**
+ * Met à jour l'indicateur lu/envoyé d'un message déjà dans le DOM
+ * sans re-rendre toute la liste.
+ */
+function updateMessageReadStatus(msgId, readAt) {
+    const msgEl = chatMessages.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!msgEl) return;
+    const metaEl = msgEl.querySelector('.msg-meta');
+    if (!metaEl) return;
+    // Reconstruire le texte de meta
+    const msg = currentMessages.find(m => m.id === msgId);
+    if (!msg) return;
+    const dateObj = new Date(msg.created_at);
+    const msgTime = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    let metaText = msg.city ? `📍 ${msg.city} · ${msgTime}` : msgTime;
+    if (readAt) {
+        metaText += ' · 👁️ Lu';
+        metaEl.classList.remove('sent-status');
+        metaEl.classList.add('read');
+    } else {
+        metaText += ' · ✓ Envoyé';
+        metaEl.classList.remove('read');
+        metaEl.classList.add('sent-status');
+    }
+    metaEl.textContent = metaText;
+}
+
+// ============================================================
+// TYPING — Realtime (Broadcast, pas postgres_changes)
+// ============================================================
+/**
+ * On utilise le canal Broadcast de Supabase Realtime pour le typing.
+ * C'est conçu exactement pour ça : événements éphémères, aucune persistance DB.
+ * → ZÉRO écriture en base pour le typing, ZÉRO egress DB.
+ */
+function subscribeToTyping() {
+    if (typingChannel) { supabase.removeChannel(typingChannel); typingChannel = null; }
+    if (!currentUserId || !userSelect.value) return;
+
+    // Canal privé entre les deux utilisateurs
+    const channelName = `typing:${[currentUserId, userSelect.value].sort().join(':')}`;
+
+    typingChannel = supabase
+        .channel(channelName)
+        .on('broadcast', { event: 'typing' }, ({ payload }) => {
+            if (payload.user_id === currentUserId) return; // ignorer mes propres events
+            if (payload.is_typing) {
+                const name = users[payload.user_id]?.username || 'L\'utilisateur';
+                typingIndicator.innerHTML = `<span>${name} est en train d'écrire</span><span class="typing-dots"><span></span><span></span><span></span></span>`;
+                typingIndicator.style.display = 'flex';
+            } else {
+                typingIndicator.style.display = 'none';
+            }
+        })
+        .subscribe();
+}
+
+/**
+ * Envoie le statut typing via Broadcast — aucune écriture DB
+ */
+async function broadcastTyping(isTypingNow) {
+    if (!typingChannel || !currentUserId) return;
+    try {
+        await typingChannel.send({
+            type: 'broadcast',
+            event: 'typing',
+            payload: { user_id: currentUserId, is_typing: isTypingNow }
+        });
+    } catch {}
+}
+
+messageInput.addEventListener('input', e => {
+    handleFontInput(e);
+    if (!isTyping) {
+        isTyping = true;
+        broadcastTyping(true);
+    }
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+        isTyping = false;
+        broadcastTyping(false);
+        typingIndicator.style.display = 'none';
+    }, 2000);
+});
+
+// ============================================================
+// APPELS ENTRANTS — Realtime (Broadcast)
+// ============================================================
+let incomingCallChannel = null;
+
+function subscribeToIncomingCalls() {
+    if (incomingCallChannel) { supabase.removeChannel(incomingCallChannel); incomingCallChannel = null; }
+    if (!currentUserId) return;
+
+    incomingCallChannel = supabase
+        .channel(`calls:${currentUserId}`)
+        .on('broadcast', { event: 'call_signal' }, ({ payload }) => {
+            handleCallSignal(payload);
+        })
+        .subscribe();
+}
+
+async function sendCallSignal(calleeId, payload) {
+    // Envoyer un signal d'appel via Broadcast au canal du destinataire
+    const ch = supabase.channel(`calls:${calleeId}`);
+    await ch.subscribe();
+    await ch.send({ type: 'broadcast', event: 'call_signal', payload });
+    await supabase.removeChannel(ch);
+}
+
+function handleCallSignal(payload) {
+    if (payload.type === 'incoming' && callState === 'idle') {
+        callState = 'ringing';
+        currentCallId = payload.callId;
+        callPeerUserId = payload.callerId;
+        showCallScreen('ringing');
+    } else if (payload.type === 'rejected' && callState === 'calling') {
+        endCall(false);
+        showCallEndedBrief('Appel refusé');
+    } else if (payload.type === 'ended') {
+        if (callState !== 'idle') endCall(false);
+    } else if (payload.type === 'answer' && peerConnection) {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer))
+            .then(() => {
+                if (payload.iceCandidates) {
+                    payload.iceCandidates.forEach(c => {
+                        peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+                    });
+                }
+                callState = 'active';
+                showCallScreen('active');
+            })
+            .catch(e => console.error('[Call] setRemoteDescription:', e));
+    } else if (payload.type === 'ice_candidate' && peerConnection) {
+        peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {});
+    }
+}
+
+// ============================================================
+// GÉOLOCALISATION — Cache unique par session
+// ============================================================
+async function getGeolocationCached() {
+    if (_geoCache) return _geoCache;
+    if (_geoPend)  return _geoPend;
+    _geoPend = new Promise((resolve, reject) => {
+        if (!navigator.geolocation) { reject(new Error('Non supporté')); return; }
+        navigator.geolocation.getCurrentPosition(
+            p => {
+                _geoCache = { latitude: p.coords.latitude, longitude: p.coords.longitude };
+                _geoPend  = null;
+                resolve(_geoCache);
+            },
+            err => { _geoPend = null; reject(err); },
+            { timeout: 3000, maximumAge: 300000 }
+        );
+    });
+    return _geoPend;
+}
+
+async function getCityFromCoordinates(lat, lon) {
+    try {
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+        const d = await r.json();
+        return d.address?.city || d.address?.town || d.address?.village || null;
+    } catch { return null; }
+}
+
+// ============================================================
+// NOTIFICATIONS PUSH
+// ============================================================
+async function requestNotificationPermission() {
+    if (!('Notification' in window)) return false;
+    if (Notification.permission === 'granted') return true;
+    if (Notification.permission !== 'denied') return (await Notification.requestPermission()) === 'granted';
+    return false;
+}
+function showNotification(title, body) {
+    if (Notification.permission === 'granted' && document.hidden) {
+        const n = new Notification(title, { body, tag: 'msg', requireInteraction: false, silent: false });
+        n.onclick = () => { window.focus(); n.close(); };
+        setTimeout(() => n.close(), 5000);
+    }
+}
+
+// ============================================================
+// UTILISATEURS
+// ============================================================
+async function getUsers() {
+    const { data, error } = await supabase.from('users').select('id, username');
+    if (error) { console.error('getUsers:', error); return; }
+    userSelect.innerHTML = '';
+    data.forEach(user => {
+        users[user.id] = user;
+        const opt = document.createElement('option');
+        opt.value = user.id;
+        opt.textContent = user.username;
+        userSelect.appendChild(opt);
+    });
+    if (currentUserId) updatePresenceUI();
+}
+
+// ============================================================
+// ACCUSÉS DE LECTURE
+// ============================================================
+async function markMessagesAsRead() {
+    if (!currentUserId || !userSelect.value) return;
+    try {
+        await supabase
+            .from('messages')
+            .update({ read_at: new Date().toISOString() })
+            .eq('id_sent', userSelect.value)
+            .eq('id_received', currentUserId)
+            .is('read_at', null);
+    } catch (e) { console.error('markMessagesAsRead:', e); }
+}
+
+// ============================================================
+// QUICK REPLIES
+// ============================================================
+function generateQuickReplies(lastMessage) {
+    if (!lastMessage || lastMessage.id_sent === currentUserId) { quickReplies.style.display = 'none'; return; }
+    const content = lastMessage.content.toLowerCase().trim();
+    if (content.startsWith('{"type":"__voice__"') || content.length < 3) { quickReplies.style.display = 'none'; return; }
+    const patterns = {
+        greeting:     { kw: ['bonjour','salut','hello','coucou','bonsoir'],        r: ['👋 Bonjour !','Salut !','Hello !','Ça va ?'] },
+        thanks:       { kw: ['merci','thanks','thx'],                              r: ['De rien !','Avec plaisir !','😊','Pas de souci !'] },
+        howareyou:    { kw: ['comment vas','ça va','tu vas'],                      r: ['Très bien merci !','Ça va et toi ?','Super !'] },
+        agreement:    { kw: ['ok','oui','yes',"d'accord"],                         r: ['Parfait !','👍','Super !','Génial !'] },
+        disagreement: { kw: ['non','no',"pas d'accord"],                           r: ["D'accord",'Pas de souci','Compris'] },
+        apology:      { kw: ['désolé','sorry','pardon'],                           r: ['Pas grave !',"T'inquiète pas",'Aucun souci'] },
+        laugh:        { kw: ['haha','lol','mdr'],                                  r: ['😂','Haha oui','Trop marrant'] },
+        planning:     { kw: ['demain','ce soir','weekend','plan','rendez-vous'],   r: ['Avec plaisir','Super idée','Je suis partant'] },
+        tired:        { kw: ['occupé','fatigue','dormir','pas le temps'],          r: ['Pas grave','À plus tard','Dors bien !'] },
+        help:         { kw: ['aide','help','besoin'],                              r: ['Bien sûr !','Avec plaisir','Je suis là'] },
+        default:      { kw: [],                                                    r: ['👍','❤️','😊','🔥','Cool','Oui'] },
+    };
+    const kwMap = {};
+    Object.entries(patterns).forEach(([cat, p]) => p.kw.forEach(k => { kwMap[k] = cat; }));
+    const matched = new Set();
+    content.split(/\s+/).forEach(w => { if (kwMap[w]) matched.add(kwMap[w]); });
+    if (!matched.size) matched.add('default');
+    const selected = [];
+    for (const cat of matched) {
+        for (const reply of patterns[cat].r) {
+            if (selected.length >= 4) break;
+            if (!selected.includes(reply)) selected.push(reply);
+        }
+        if (selected.length >= 4) break;
+    }
+    if (!selected.length) { quickReplies.style.display = 'none'; return; }
+    quickReplies.innerHTML = '';
+    selected.forEach(reply => {
+        const btn = document.createElement('button');
+        btn.className = 'quick-reply-btn';
+        btn.textContent = reply;
+        btn.addEventListener('click', () => {
+            messageInput.value = reply;
+            rawInputText = reply;
+            prevConvertedValue = reply;
+            handleSend();
+            quickReplies.style.display = 'none';
+        });
+        quickReplies.appendChild(btn);
+    });
+    quickReplies.style.display = 'flex';
 }
 
 // ============================================================
@@ -448,7 +848,8 @@ function initEmojiPicker() {
         const pos    = messageInput.selectionStart ?? messageInput.value.length;
         const rawPos = Math.min(pos, rawInputText.length);
         rawInputText = rawInputText.slice(0, rawPos) + e.detail.unicode + rawInputText.slice(rawPos);
-        applyFontToInput(); prevConvertedValue = messageInput.value;
+        applyFontToInput();
+        prevConvertedValue = messageInput.value;
         const newPos = pos + e.detail.unicode.length;
         try { messageInput.setSelectionRange(newPos, newPos); } catch {}
         messageInput.focus();
@@ -481,155 +882,17 @@ document.addEventListener('click', e => {
 });
 
 // ============================================================
-// NOTIFICATIONS PUSH
-// ============================================================
-async function requestNotificationPermission() {
-    if (!('Notification' in window)) return false;
-    if (Notification.permission === 'granted') return true;
-    if (Notification.permission !== 'denied') return (await Notification.requestPermission()) === 'granted';
-    return false;
-}
-function showNotification(title, body) {
-    if (Notification.permission === 'granted' && document.hidden) {
-        const n = new Notification(title, { body, tag: 'msg', requireInteraction: false, silent: false });
-        n.onclick = () => { window.focus(); n.close(); };
-        setTimeout(() => n.close(), 5000);
-    }
-}
-
-// ============================================================
-// UTILISATEURS
-// ============================================================
-async function getUsers() {
-    const r = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username`, { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-    const data = await r.json();
-    if (!r.ok) { console.error('getUsers:', data); return; }
-    userSelect.innerHTML = '';
-    data.forEach(user => {
-        users[user.id] = user;
-        const opt = document.createElement('option');
-        opt.value = user.id; opt.textContent = user.username;
-        userSelect.appendChild(opt);
-    });
-    if (currentUserId) refreshPresence();
-}
-
-// ============================================================
-// TYPING INDICATOR
-// ============================================================
-async function updateTypingStatus(isTypingNow) {
-    if (!currentUserId || !userSelect.value) return;
-    try {
-        const check = await fetch(`${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const existing = await check.json();
-        const body = JSON.stringify({ is_typing: isTypingNow, updated_at: new Date().toISOString() });
-        if (existing.length > 0) {
-            await fetch(`${supabaseUrl}/rest/v1/typing_status?user_id=eq.${currentUserId}&recipient_id=eq.${userSelect.value}`,
-                { method: 'PATCH', headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` }, body });
-        } else {
-            await fetch(`${supabaseUrl}/rest/v1/typing_status`,
-                { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' },
-                  body: JSON.stringify({ user_id: currentUserId, recipient_id: userSelect.value, is_typing: isTypingNow, updated_at: new Date().toISOString() }) });
-        }
-    } catch (e) { console.error('updateTypingStatus:', e); }
-}
-
-async function checkTypingStatus() {
-    if (!currentUserId || !userSelect.value) { typingIndicator.style.display = 'none'; return; }
-    try {
-        const r = await fetch(`${supabaseUrl}/rest/v1/typing_status?user_id=eq.${userSelect.value}&recipient_id=eq.${currentUserId}&select=*`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const data = await r.json();
-        if (data.length > 0 && data[0].is_typing && (Date.now() - new Date(data[0].updated_at)) / 1000 < 3) {
-            const name = users[userSelect.value]?.username || 'L\'utilisateur';
-            typingIndicator.innerHTML = `<span>${name} est en train d'écrire</span><span class="typing-dots"><span></span><span></span><span></span></span>`;
-            typingIndicator.style.display = 'flex';
-        } else {
-            typingIndicator.style.display = 'none';
-        }
-    } catch (e) { console.error('checkTypingStatus:', e); }
-}
-
-messageInput.addEventListener('input', e => {
-    handleFontInput(e);
-    if (!isTyping) { isTyping = true; updateTypingStatus(true); }
-    clearTimeout(typingTimeout);
-    typingTimeout = setTimeout(() => { isTyping = false; updateTypingStatus(false); }, 2000);
-});
-
-// ============================================================
-// RÉPONSES RAPIDES
-// ============================================================
-function generateQuickReplies(lastMessage) {
-    if (!lastMessage || lastMessage.id_sent === currentUserId) { quickReplies.style.display = 'none'; return; }
-    const content = lastMessage.content.toLowerCase().trim();
-    if (content.startsWith('{"type":"__voice__"')) { quickReplies.style.display = 'none'; return; }
-    if (content.length < 3) { quickReplies.style.display = 'none'; return; }
-    const patterns = {
-        greeting:     { kw: ['bonjour','salut','hello','coucou','bonsoir'],       r: ['👋 Bonjour !','Salut !','Hello !','Ça va ?'] },
-        thanks:       { kw: ['merci','thanks','thx'],                             r: ['De rien !','Avec plaisir !','😊','Pas de souci !'] },
-        howareyou:    { kw: ['comment vas','ça va','tu vas'],                     r: ['Très bien merci !','Ça va et toi ?','Super !'] },
-        agreement:    { kw: ['ok','oui','yes',"d'accord"],                        r: ['Parfait !','👍','Super !','Génial !'] },
-        disagreement: { kw: ['non','no',"pas d'accord"],                          r: ["D'accord",'Pas de souci','Compris'] },
-        apology:      { kw: ['désolé','sorry','pardon'],                          r: ['Pas grave !',"T'inquiète pas",'Aucun souci'] },
-        laugh:        { kw: ['haha','lol','mdr'],                                 r: ['😂','Haha oui','Trop marrant'] },
-        planning:     { kw: ['demain','ce soir','weekend','plan','rendez-vous'],  r: ['Avec plaisir','Super idée','Je suis partant'] },
-        tired:        { kw: ['occupé','fatigue','dormir','pas le temps'],         r: ['Pas grave','À plus tard','Dors bien !'] },
-        help:         { kw: ['aide','help','besoin'],                             r: ['Bien sûr !','Avec plaisir','Je suis là'] },
-        default:      { kw: [],                                                   r: ['👍','❤️','😊','🔥','Cool','Oui'] },
-    };
-    const kwMap = {};
-    Object.entries(patterns).forEach(([cat, p]) => p.kw.forEach(k => { kwMap[k] = cat; }));
-    const matched = new Set();
-    content.split(/\s+/).forEach(w => { if (kwMap[w]) matched.add(kwMap[w]); });
-    if (!matched.size) matched.add('default');
-    const selected = [];
-    for (const cat of matched) {
-        for (const reply of patterns[cat].r) {
-            if (selected.length >= 4) break;
-            if (!selected.includes(reply)) selected.push(reply);
-        }
-        if (selected.length >= 4) break;
-    }
-    if (!selected.length) { quickReplies.style.display = 'none'; return; }
-    quickReplies.innerHTML = '';
-    selected.forEach(reply => {
-        const btn = document.createElement('button');
-        btn.className = 'quick-reply-btn'; btn.textContent = reply;
-        btn.addEventListener('click', () => { messageInput.value = reply; rawInputText = reply; prevConvertedValue = reply; handleSend(); quickReplies.style.display = 'none'; });
-        quickReplies.appendChild(btn);
-    });
-    quickReplies.style.display = 'flex';
-}
-
-// ============================================================
-// ACCUSÉS DE RÉCEPTION
-// ============================================================
-async function markMessagesAsRead() {
-    if (!currentUserId || !userSelect.value) return;
-    try {
-        await fetch(`${supabaseUrl}/rest/v1/messages?id_sent=eq.${userSelect.value}&id_received=eq.${currentUserId}&read_at=is.null`,
-            { method: 'PATCH', headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' },
-              body: JSON.stringify({ read_at: new Date().toISOString() }) });
-        await fetchUnreadByUser(); updatePresenceUI_display();
-    } catch (e) { console.error('markMessagesAsRead:', e); }
-}
-
-// ============================================================
-// MESSAGES VOCAUX — Parsing
+// MESSAGES — Rendu
 // ============================================================
 function parseVoiceMessage(content) {
     if (!content || !content.startsWith('{')) return null;
     try { const obj = JSON.parse(content); if (obj.type === '__voice__') return obj; } catch {}
     return null;
 }
-
 function formatVoiceDuration(seconds) {
     const s = Math.round(Math.max(0, seconds));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
-
 function generateStaticWaveform(duration, width) {
     const bars = Math.max(30, Math.min(60, Math.floor((width || 200) / 4)));
     const seed  = Math.floor(duration * 100);
@@ -637,7 +900,6 @@ function generateStaticWaveform(duration, width) {
     function pseudoRand() { rng = (rng * 1664525 + 1013904223) & 0xFFFFFFFF; return (rng >>> 0) / 0xFFFFFFFF; }
     return Array.from({ length: bars }, (_, i) => pseudoRand() * (Math.sin((i / bars) * Math.PI) * 0.7 + 0.3));
 }
-
 function drawStaticWaveform(canvas, data, progress, isSent) {
     canvas.width  = canvas.offsetWidth  || 160;
     canvas.height = canvas.offsetHeight || 32;
@@ -656,31 +918,24 @@ function drawStaticWaveform(canvas, data, progress, isSent) {
         ctx.fill();
     });
 }
-
 function createVoiceMessagePlayer(voiceData, isSent) {
     const wrap = document.createElement('div');
     wrap.className = 'voice-message-player';
-
     const playBtn = document.createElement('button');
     playBtn.className = 'vmp-play-btn';
     playBtn.textContent = '▶';
-
     const waveWrap = document.createElement('div');
     waveWrap.className = 'vmp-waveform-container';
     const canvas = document.createElement('canvas');
     waveWrap.appendChild(canvas);
-
     const info = document.createElement('div');
     info.className = 'vmp-info';
-
     const durSpan = document.createElement('span');
     durSpan.className = 'vmp-duration';
     durSpan.textContent = formatVoiceDuration(voiceData.duration || 0);
-
     const speedBtn = document.createElement('button');
     speedBtn.className = 'vmp-speed-btn';
     speedBtn.textContent = '1x';
-
     if (voiceData.effect && voiceData.effect !== 'normal') {
         const effectBadge = document.createElement('span');
         effectBadge.className = 'vmp-effect-badge';
@@ -692,20 +947,16 @@ function createVoiceMessagePlayer(voiceData, isSent) {
     wrap.appendChild(playBtn);
     wrap.appendChild(waveWrap);
     wrap.appendChild(info);
-
     const audio = new Audio(voiceData.data || voiceData.url);
     let playbackRate = 1, isPlaying = false, animId = null;
-
     const waveData = generateStaticWaveform(voiceData.duration || 10, 160);
     setTimeout(() => drawStaticWaveform(canvas, waveData, 0, isSent), 60);
-
     speedBtn.addEventListener('click', () => {
         const speeds = [1, 1.5, 2];
         playbackRate = speeds[(speeds.indexOf(playbackRate) + 1) % speeds.length];
         audio.playbackRate = playbackRate;
         speedBtn.textContent = `${playbackRate}x`;
     });
-
     playBtn.addEventListener('click', async () => {
         if (isPlaying) {
             audio.pause(); isPlaying = false; playBtn.textContent = '▶';
@@ -718,45 +969,362 @@ function createVoiceMessagePlayer(voiceData, isSent) {
             animatePlay();
         }
     });
-
     audio.addEventListener('ended', () => {
         isPlaying = false; playBtn.textContent = '▶';
         cancelAnimationFrame(animId);
         drawStaticWaveform(canvas, waveData, 0, isSent);
         durSpan.textContent = formatVoiceDuration(voiceData.duration || 0);
     });
-
     waveWrap.addEventListener('click', e => {
         const pct = (e.clientX - waveWrap.getBoundingClientRect().left) / waveWrap.offsetWidth;
         audio.currentTime = pct * (voiceData.duration || audio.duration || 0);
         drawStaticWaveform(canvas, waveData, pct, isSent);
     });
-
     function animatePlay() {
         animId = requestAnimationFrame(animatePlay);
         const dur = voiceData.duration || audio.duration || 1;
         drawStaticWaveform(canvas, waveData, audio.currentTime / dur, isSent);
         durSpan.textContent = formatVoiceDuration(dur - audio.currentTime);
     }
-
     return wrap;
 }
 
+function renderMessages(data) {
+    chatMessages.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    let lastDate = null;
+    data.forEach(message => appendToFragment(fragment, message, lastDate, d => { lastDate = d; }));
+    chatMessages.appendChild(fragment);
+}
+
+function appendMessageElement(message) {
+    // Ajouter un seul message en bas de la liste (utilisé par Realtime)
+    const last = currentMessages[currentMessages.length - 2]; // avant le nouveau
+    const lastDate = last ? new Date(last.created_at).toLocaleDateString('fr-FR') : null;
+    const fragment = document.createDocumentFragment();
+    appendToFragment(fragment, message, lastDate, () => {});
+    chatMessages.appendChild(fragment);
+}
+
+function appendToFragment(fragment, message, lastDate, setLastDate) {
+    const dateObj  = new Date(message.created_at);
+    const msgDate  = dateObj.toLocaleDateString('fr-FR');
+    const msgTime  = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    const isMine   = message.id_sent === currentUserId;
+    const sender   = users[message.id_sent]?.username || 'Inconnu';
+    const voiceData = parseVoiceMessage(message.content);
+
+    if (msgDate !== lastDate) {
+        const el = document.createElement('div');
+        el.className = 'date';
+        el.textContent = msgDate;
+        fragment.appendChild(el);
+        setLastDate(msgDate);
+    }
+
+    const msgEl = document.createElement('div');
+    msgEl.classList.add('message', isMine ? 'sent' : 'received');
+    if (voiceData) msgEl.classList.add('voice-msg');
+    // data-msg-id permet de retrouver le message dans le DOM pour les mises à jour partielles
+    msgEl.dataset.msgId = message.id;
+
+    const senderSpan = document.createElement('span');
+    senderSpan.className = 'msg-sender';
+    senderSpan.textContent = sender;
+
+    const metaSpan = document.createElement('span');
+    metaSpan.className = 'msg-meta';
+    let metaText = message.city ? `📍 ${message.city} · ${msgTime}` : msgTime;
+    if (isMine) {
+        if (message.read_at) { metaText += ' · 👁️ Lu'; metaSpan.classList.add('read'); }
+        else                  { metaText += ' · ✓ Envoyé'; metaSpan.classList.add('sent-status'); }
+    }
+    metaSpan.textContent = metaText;
+
+    msgEl.appendChild(senderSpan);
+    if (voiceData) {
+        msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine));
+    } else {
+        msgEl.appendChild(document.createTextNode(message.content));
+    }
+    msgEl.appendChild(metaSpan);
+
+    if (isMine) {
+        const del = document.createElement('span');
+        del.textContent = '✖';
+        del.className = 'delete-button';
+        del.addEventListener('click', () => deleteMessage(message.id));
+        msgEl.appendChild(del);
+    }
+    fragment.appendChild(msgEl);
+}
+
+function appendOptimisticMessage(content) {
+    const now = new Date();
+    const msgTime = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    const msgDate = now.toLocaleDateString('fr-FR');
+
+    const lastDateEl = chatMessages.querySelector('.date:last-of-type');
+    if (!lastDateEl || lastDateEl.textContent !== msgDate) {
+        const dateEl = document.createElement('div');
+        dateEl.className = 'date';
+        dateEl.textContent = msgDate;
+        chatMessages.appendChild(dateEl);
+    }
+
+    const voiceData = parseVoiceMessage(content);
+    const msgEl = document.createElement('div');
+    msgEl.classList.add('message', 'sent', 'optimistic');
+    if (voiceData) msgEl.classList.add('voice-msg');
+
+    const senderSpan = document.createElement('span');
+    senderSpan.className = 'msg-sender';
+    senderSpan.textContent = users[currentUserId]?.username || 'Moi';
+
+    const metaSpan = document.createElement('span');
+    metaSpan.className = 'msg-meta';
+    metaSpan.textContent = `${msgTime} · ⏳`;
+
+    msgEl.appendChild(senderSpan);
+    if (voiceData) {
+        msgEl.appendChild(createVoiceMessagePlayer(voiceData, true));
+    } else {
+        msgEl.appendChild(document.createTextNode(content));
+    }
+    msgEl.appendChild(metaSpan);
+    chatMessages.appendChild(msgEl);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return msgEl;
+}
+
 // ============================================================
-// MESSAGES VOCAUX — Enregistrement
+// ENVOI DE MESSAGES
+// ============================================================
+async function deleteMessage(messageId) {
+    const { error } = await supabase.from('messages').delete().eq('id', messageId);
+    if (error) { console.error('deleteMessage:', error); return; }
+    // Retirer du DOM et de la liste locale sans re-fetch
+    const el = chatMessages.querySelector(`[data-msg-id="${messageId}"]`);
+    if (el) el.remove();
+    currentMessages = currentMessages.filter(m => m.id !== messageId);
+}
+
+async function sendMessage(userId, content) {
+    const isVoice = content.startsWith('{"type":"__voice__"');
+    let optimisticEl = null;
+    if (!isVoice) optimisticEl = appendOptimisticMessage(content);
+
+    isTyping = false;
+    clearTimeout(typingTimeout);
+    broadcastTyping(false);
+
+    const { data, error } = await supabase
+        .from('messages')
+        .insert({
+            id_sent:     userId,
+            content:     content,
+            created_at:  new Date().toISOString(),
+            id_received: userSelect.value,
+            read_at:     null,
+            latitude:    null,
+            longitude:   null,
+            city:        null
+        })
+        .select('id, id_sent, id_received, content, created_at, read_at, city')
+        .single();
+
+    if (error) {
+        console.error('sendMessage:', error);
+        optimisticEl?.remove();
+        return false;
+    }
+
+    // Remplacer le message optimiste par le message réel (avec ID)
+    if (optimisticEl) {
+        optimisticEl.remove();
+        currentMessages.push(data);
+        appendMessageElement(data);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    // Géolocalisation en arrière-plan — PATCH asynchrone, ne bloque pas l'UI
+    if (data.id) {
+        getGeolocationCached().then(async geo => {
+            const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
+            if (!city && !geo.latitude) return;
+            await supabase
+                .from('messages')
+                .update({ latitude: geo.latitude, longitude: geo.longitude, city })
+                .eq('id', data.id);
+            // Mettre à jour localement sans re-fetch
+            const idx = currentMessages.findIndex(m => m.id === data.id);
+            if (idx !== -1) currentMessages[idx].city = city;
+        }).catch(() => {});
+    }
+
+    return true;
+}
+
+async function handleSend() {
+    if (!currentUserId) { alert('Veuillez vous connecter pour envoyer un message'); return; }
+    const content = messageInput.value.trim();
+    if (!content) return;
+
+    messageInput.value = '';
+    messageInput.focus();
+    quickReplies.style.display = 'none';
+    rawInputText = ''; prevConvertedValue = '';
+
+    await sendMessage(currentUserId, content);
+}
+
+sendButton.addEventListener('click', handleSend);
+messageInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } });
+
+// ============================================================
+// CONNEXION / DÉCONNEXION
+// ============================================================
+function showConnectedUI(username) {
+    loginContainer.style.display  = 'none';
+    connectedUser.style.display   = 'flex';
+    connectedUsername.textContent  = username;
+}
+
+async function completeLogin(user, plainPassword) {
+    currentUserId = user.id;
+    users[user.id] = { id: user.id, username: user.username };
+    showConnectedUI(user.username);
+    saveSession({
+        userId: user.id,
+        username: user.username,
+        plainPassword,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + SESSION_MS
+    });
+    await getUsers();
+    await loadInitialMessages();
+    subscribeToConversation();
+    subscribeToTyping();
+    subscribeToPresence();
+    subscribeToIncomingCalls();
+    getGeolocationCached().catch(() => {});
+}
+
+async function login() {
+    const username = loginUsername.value.trim(), password = loginPassword.value;
+    if (!username || !password) { alert('Veuillez remplir tous les champs'); return; }
+    try {
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, username, password')
+            .eq('username', username)
+            .single();
+        if (error || !data)           { alert('Utilisateur non trouvé'); return; }
+        if (data.password !== password) { alert('Mot de passe incorrect'); return; }
+        await requestNotificationPermission();
+        await completeLogin(data, password);
+    } catch (e) { console.error('login:', e); alert('Erreur de connexion'); }
+}
+
+async function checkAutoLogin() {
+    const raw = localStorage.getItem('pending_auto_login');
+    if (!raw) return false;
+    localStorage.removeItem('pending_auto_login');
+    let pending;
+    try { pending = JSON.parse(raw); } catch { return false; }
+    if (!pending?.userId || !pending?.plainPassword) return false;
+    try {
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, username, password')
+            .eq('id', pending.userId)
+            .single();
+        if (error || !data || data.password !== pending.plainPassword) return false;
+        await requestNotificationPermission();
+        await completeLogin(data, pending.plainPassword);
+        return true;
+    } catch { return false; }
+}
+
+async function logout(options = {}) {
+    const { reason = '' } = options;
+
+    // Stopper typing
+    if (isTyping) { isTyping = false; broadcastTyping(false); }
+    clearTimeout(typingTimeout);
+
+    // Stopper enregistrement vocal
+    if (isRecording) cancelVoiceRecording();
+
+    // Raccrocher si appel en cours
+    if (callState !== 'idle' && currentCallId) {
+        await sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
+        endCall(false);
+    }
+
+    // Fermer tous les canaux Realtime
+    if (msgChannel)          { await supabase.removeChannel(msgChannel);          msgChannel = null; }
+    if (typingChannel)       { await supabase.removeChannel(typingChannel);       typingChannel = null; }
+    if (presenceChannel)     { await supabase.removeChannel(presenceChannel);     presenceChannel = null; }
+    if (incomingCallChannel) { await supabase.removeChannel(incomingCallChannel); incomingCallChannel = null; }
+
+    closeEmojiPicker();
+    closeFontPicker();
+    resetFont();
+
+    currentUserId    = null;
+    currentMessages  = [];
+    _geoCache        = null;
+    _geoPend         = null;
+
+    clearSession();
+    clearPresenceUI();
+
+    loginContainer.style.display  = 'block';
+    connectedUser.style.display   = 'none';
+    chatMessages.innerHTML        = '';
+    typingIndicator.style.display = 'none';
+    quickReplies.style.display    = 'none';
+
+    if (reason) alert(reason);
+}
+
+loginButton.addEventListener('click', login);
+logoutButton.addEventListener('click', () => logout());
+loginPassword.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); login(); } });
+
+// ============================================================
+// CHANGEMENT D'INTERLOCUTEUR
+// ============================================================
+userSelect.addEventListener('change', async () => {
+    currentMessages = [];
+    typingIndicator.style.display = 'none';
+    quickReplies.style.display    = 'none';
+    isTyping = false;
+    clearTimeout(typingTimeout);
+
+    if (currentUserId) {
+        // Resubscribe aux canaux pour la nouvelle conversation
+        subscribeToConversation();
+        subscribeToTyping();
+        await loadInitialMessages();
+        updatePresenceUI();
+    }
+});
+
+// ============================================================
+// MESSAGES VOCAUX — Enregistrement (inchangé)
 // ============================================================
 function getVoiceSupportedMimeType() {
     const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
     for (const t of types) { if (MediaRecorder.isTypeSupported(t)) return t; }
     return 'audio/webm';
 }
-
 function getEventCoords(e) {
     if (e.touches && e.touches.length > 0)    return { x: e.touches[0].clientX, y: e.touches[0].clientY };
     if (e.changedTouches && e.changedTouches.length > 0) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
     return { x: e.clientX, y: e.clientY };
 }
-
 function onVoicePressStart(e) {
     if (isRecording) return;
     if (e.type === 'touchstart') e.preventDefault();
@@ -765,7 +1333,6 @@ function onVoicePressStart(e) {
     pressBtnTimer = setTimeout(() => startVoiceRecording(), PRESS_DURATION_MS);
     document.getElementById('voice-record-btn').style.transform = 'scale(0.9)';
 }
-
 function onVoicePressEnd(e) {
     clearTimeout(pressBtnTimer);
     document.getElementById('voice-record-btn').style.transform = '';
@@ -776,14 +1343,12 @@ function onVoicePressEnd(e) {
         else stopVoiceAndSend();
     }
 }
-
 function onVoicePressMove(e) {
     if (!isRecording || isVoiceLocked) return;
     if (e.type === 'touchmove') e.preventDefault();
     const { x, y } = getEventCoords(e);
     const dx = x - slideStartX, dy = y - slideStartY;
     const indicator = document.getElementById('voice-slide-indicator');
-
     if (dx < -20) {
         indicator.textContent = '← Relâcher pour annuler';
         indicator.style.color = `rgba(239,68,68,${0.5 + Math.min(Math.abs(dx) / 60, 1) * 0.5})`;
@@ -798,20 +1363,14 @@ function onVoicePressMove(e) {
         indicator.classList.remove('show');
     }
 }
-
-function hideVoiceSlideIndicator() {
-    document.getElementById('voice-slide-indicator')?.classList.remove('show');
-}
+function hideVoiceSlideIndicator() { document.getElementById('voice-slide-indicator')?.classList.remove('show'); }
 
 async function startVoiceRecording() {
     try {
         recordingStream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 44100 }
         });
-    } catch {
-        alert('Microphone inaccessible. Vérifiez les permissions du navigateur.'); return;
-    }
-
+    } catch { alert('Microphone inaccessible. Vérifiez les permissions du navigateur.'); return; }
     voiceAudioContext = new (window.AudioContext || window.webkitAudioContext)();
     voiceAnalyserNode = voiceAudioContext.createAnalyser();
     voiceAnalyserNode.fftSize = 256;
@@ -820,42 +1379,32 @@ async function startVoiceRecording() {
     voiceFilterNode = voiceAudioContext.createBiquadFilter();
     voiceFilterNode.type = 'highpass';
     voiceFilterNode.frequency.value = 80;
-
     const source = voiceAudioContext.createMediaStreamSource(recordingStream);
     source.connect(voiceGainNode);
     voiceGainNode.connect(voiceAnalyserNode);
     voiceGainNode.connect(voiceFilterNode);
-
     mediaRecorder = new MediaRecorder(recordingStream, { mimeType: getVoiceSupportedMimeType() });
     audioChunks = [];
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.start(100);
-
     isRecording = true; isPaused = false; isVoiceLocked = false;
     pausedDuration = 0; pauseStartTime = null;
     recordingStartTime = Date.now();
-
     const micBtn = document.getElementById('voice-record-btn');
-    micBtn.classList.add('recording');
-    micBtn.innerHTML = '⏹';
-
+    micBtn.classList.add('recording'); micBtn.innerHTML = '⏹';
     document.getElementById('voice-slide-hint').classList.add('visible');
     startVoiceTimer();
 }
-
 function lockVoiceRecording() {
     if (!isRecording || isVoiceLocked) return;
     isVoiceLocked = true;
     const micBtn = document.getElementById('voice-record-btn');
-    micBtn.classList.remove('recording');
-    micBtn.classList.add('locked');
-    micBtn.innerHTML = '🔒';
+    micBtn.classList.remove('recording'); micBtn.classList.add('locked'); micBtn.innerHTML = '🔒';
     document.getElementById('voice-slide-hint').classList.remove('visible');
     document.getElementById('voice-locked-bar').classList.add('visible');
     startVoiceWaveform();
     hideVoiceSlideIndicator();
 }
-
 function toggleVoicePause() {
     if (!isRecording) return;
     const btn = document.getElementById('vlb-pause-btn');
@@ -871,9 +1420,7 @@ function toggleVoicePause() {
         cancelAnimationFrame(waveformAnimId);
     }
 }
-
 function cancelVoiceRecording() { cleanupVoiceRecording(); audioChunks = []; }
-
 function stopVoiceAndSend() {
     if (!isRecording) return;
     const durationSeconds = Math.round((Date.now() - recordingStartTime - pausedDuration) / 1000);
@@ -886,7 +1433,6 @@ function stopVoiceAndSend() {
     mediaRecorder.stop();
     cleanupVoiceRecording();
 }
-
 function cleanupVoiceRecording() {
     isRecording = false; isPaused = false; isVoiceLocked = false;
     if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
@@ -895,7 +1441,6 @@ function cleanupVoiceRecording() {
     cancelAnimationFrame(waveformAnimId);
     clearInterval(recordingTimer); recordingTimer = null; recordingStartTime = null;
     stopVoiceAmbianceSound();
-
     const micBtn = document.getElementById('voice-record-btn');
     if (micBtn) { micBtn.classList.remove('recording', 'locked'); micBtn.innerHTML = '🎙️'; micBtn.style.transform = ''; }
     document.getElementById('voice-slide-hint')?.classList.remove('visible');
@@ -909,7 +1454,6 @@ function cleanupVoiceRecording() {
     if (pauseBtn) { pauseBtn.textContent = '⏸ Pause'; pauseBtn.classList.remove('paused'); }
     hideVoiceSlideIndicator();
 }
-
 function startVoiceTimer() {
     clearInterval(recordingTimer);
     recordingTimer = setInterval(() => {
@@ -923,7 +1467,6 @@ function startVoiceTimer() {
         if (elapsed >= MAX_VOICE_DURATION) stopVoiceAndSend();
     }, 500);
 }
-
 function startVoiceWaveform() {
     cancelAnimationFrame(waveformAnimId);
     const canvas = document.getElementById('vlb-waveform-canvas');
@@ -947,13 +1490,11 @@ function startVoiceWaveform() {
     }
     draw();
 }
-
 async function processAndSendVoice(blob, mimeType, durationSeconds) {
     let processedBlob = blob;
     if (voiceEffect !== 'normal') {
         try { processedBlob = await applyVoiceEffectDSP(blob); } catch { processedBlob = blob; }
     }
-
     const arrayBuffer = await processedBlob.arrayBuffer();
     const uint8 = new Uint8Array(arrayBuffer);
     let base64 = '';
@@ -962,29 +1503,20 @@ async function processAndSendVoice(blob, mimeType, durationSeconds) {
         base64 += String.fromCharCode(...uint8.subarray(i, i + chunkSize));
     }
     const dataUrl = `data:${processedBlob.type || mimeType};base64,${btoa(base64)}`;
-
     if (!currentUserId || !userSelect.value) { alert('Connectez-vous pour envoyer un message vocal.'); return; }
-
-    const voicePayload = JSON.stringify({
-        type: '__voice__', data: dataUrl, mime: mimeType,
-        duration: durationSeconds, effect: voiceEffect
-    });
-
+    const voicePayload = JSON.stringify({ type: '__voice__', data: dataUrl, mime: mimeType, duration: durationSeconds, effect: voiceEffect });
     await sendMessage(currentUserId, voicePayload);
 }
-
 async function applyVoiceEffectDSP(blob) {
     const effect = VOICE_EFFECTS[voiceEffect] || VOICE_EFFECTS.normal;
     const arrayBuffer = await blob.arrayBuffer();
     const tmpCtx = new OfflineAudioContext(1, 44100 * MAX_VOICE_DURATION, 44100);
     let decoded;
     try { decoded = await tmpCtx.decodeAudioData(arrayBuffer.slice(0)); } catch { return blob; }
-
     const offlineCtx = new OfflineAudioContext(1, Math.max(decoded.length, 1024), 44100);
     const source = offlineCtx.createBufferSource();
     source.buffer = decoded;
     source.playbackRate.value = effect.pitch;
-
     if (effect.robot) {
         const waveshaper = offlineCtx.createWaveShaper();
         const n = 256; const curve = new Float32Array(n);
@@ -995,11 +1527,9 @@ async function applyVoiceEffectDSP(blob) {
         source.connect(offlineCtx.destination);
     }
     source.start(0);
-
     const rendered = await offlineCtx.startRendering();
     return audioBufferToWav(rendered);
 }
-
 function audioBufferToWav(buffer) {
     const numCh = buffer.numberOfChannels, sr = buffer.sampleRate, data = buffer.getChannelData(0);
     const byteLen = 44 + data.length * 2, ab = new ArrayBuffer(byteLen), view = new DataView(ab);
@@ -1016,7 +1546,6 @@ function audioBufferToWav(buffer) {
     }
     return new Blob([ab], { type: 'audio/wav' });
 }
-
 function startVoiceAmbianceSound(type) {
     stopVoiceAmbianceSound();
     if (!voiceAudioContext || !type || type === 'none') return;
@@ -1050,12 +1579,10 @@ function startVoiceAmbianceSound(type) {
         });
     }
 }
-
 function stopVoiceAmbianceSound() {
     ambianceNodes.forEach(n => { try { if (n.stop) n.stop(); n.disconnect(); } catch {} });
     ambianceNodes = [];
 }
-
 function createVoiceNoise(ctx, volume) {
     const sz = ctx.sampleRate * 2, buf = ctx.createBuffer(1, sz, ctx.sampleRate), data = buf.getChannelData(0);
     for (let i = 0; i < sz; i++) data[i] = (Math.random() * 2 - 1) * volume;
@@ -1072,7 +1599,6 @@ function injectVoiceUI() {
     const chatInputEl   = document.querySelector('.chat-input');
     const sendBtn       = document.getElementById('send-button');
     if (!chatContainer || !chatInputEl || !sendBtn) return;
-
     const effectsPanel = document.createElement('div');
     effectsPanel.id = 'voice-effects-panel';
     effectsPanel.innerHTML = `
@@ -1095,7 +1621,6 @@ function injectVoiceUI() {
             </div>
         </div>`;
     chatContainer.insertBefore(effectsPanel, chatInputEl);
-
     const lockedBar = document.createElement('div');
     lockedBar.id = 'voice-locked-bar';
     lockedBar.innerHTML = `
@@ -1111,7 +1636,6 @@ function injectVoiceUI() {
             <button class="vlb-btn primary" id="vlb-send-btn" style="margin-left:auto;">Envoyer ▶</button>
         </div>`;
     chatContainer.insertBefore(lockedBar, chatInputEl);
-
     const slideHint = document.createElement('div');
     slideHint.id = 'voice-slide-hint';
     slideHint.innerHTML = `
@@ -1119,32 +1643,27 @@ function injectVoiceUI() {
         <span class="hint-timer" id="voice-hint-timer">0:00</span>
         <span class="hint-lock">↑ Verrouiller</span>`;
     chatContainer.insertBefore(slideHint, chatInputEl);
-
     const slideInd = document.createElement('div');
     slideInd.className = 'voice-slide-indicator';
     slideInd.id = 'voice-slide-indicator';
     chatContainer.appendChild(slideInd);
-
     const micBtn = document.createElement('button');
     micBtn.id = 'voice-record-btn';
     micBtn.title = 'Message vocal (maintenir appuyé)';
     micBtn.innerHTML = '🎙️';
     chatInputEl.insertBefore(micBtn, sendBtn);
-
     micBtn.addEventListener('mousedown', onVoicePressStart);
     micBtn.addEventListener('touchstart', onVoicePressStart, { passive: false });
     document.addEventListener('mouseup',   onVoicePressEnd);
     document.addEventListener('touchend',  onVoicePressEnd);
     document.addEventListener('mousemove', onVoicePressMove);
     document.addEventListener('touchmove', onVoicePressMove, { passive: false });
-
     document.getElementById('vlb-cancel-btn').addEventListener('click', cancelVoiceRecording);
     document.getElementById('vlb-pause-btn').addEventListener('click', toggleVoicePause);
     document.getElementById('vlb-send-btn').addEventListener('click', stopVoiceAndSend);
     document.getElementById('vlb-effects-btn').addEventListener('click', () => {
         document.getElementById('voice-effects-panel').classList.toggle('visible');
     });
-
     effectsPanel.querySelectorAll('.voice-chip').forEach(chip => {
         chip.addEventListener('click', () => {
             voiceEffect = chip.dataset.effect;
@@ -1165,49 +1684,54 @@ function injectVoiceUI() {
 }
 
 // ============================================================
-// APPELS AUDIO — État
+// APPELS AUDIO — WebRTC (signalisation Broadcast, pas DB)
 // ============================================================
-let callState = 'idle'; // idle | calling | ringing | active | reconnecting
-let currentCallId   = null;
-let callPeerUserId  = null;
-let peerConnection  = null;
-let localStream     = null;
-let remoteAudio     = null;
-let callTimer       = null;
-let callDuration    = 0;
-let callPollInterval = null;
-let isMuted         = false;
-let isSpeakerOn     = false;
-let callReconnectAttempts = 0;
-let ringtoneInterval = null;
-let ringtoneCtx      = null;
+function startRingtone(type) {
+    stopRingtone();
+    try { ringtoneCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; }
+    function playTone(freq, duration, startTime) {
+        if (!ringtoneCtx) return;
+        const osc  = ringtoneCtx.createOscillator();
+        const gain = ringtoneCtx.createGain();
+        osc.type = 'sine'; osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0, startTime);
+        gain.gain.linearRampToValueAtTime(0.18, startTime + 0.02);
+        gain.gain.linearRampToValueAtTime(0.18, startTime + duration - 0.02);
+        gain.gain.linearRampToValueAtTime(0, startTime + duration);
+        osc.connect(gain); gain.connect(ringtoneCtx.destination);
+        osc.start(startTime); osc.stop(startTime + duration);
+    }
+    if (type === 'incoming') {
+        function playIncomingCycle() {
+            if (!ringtoneCtx || callState === 'idle') return;
+            const now = ringtoneCtx.currentTime;
+            playTone(880, 0.3, now); playTone(660, 0.3, now + 0.35);
+        }
+        playIncomingCycle();
+        ringtoneInterval = setInterval(playIncomingCycle, 2000);
+    } else {
+        function playOutgoingCycle() {
+            if (!ringtoneCtx || callState === 'idle') return;
+            const now = ringtoneCtx.currentTime;
+            playTone(440, 0.5, now);
+        }
+        playOutgoingCycle();
+        ringtoneInterval = setInterval(playOutgoingCycle, 3000);
+    }
+}
+function stopRingtone() {
+    clearInterval(ringtoneInterval); ringtoneInterval = null;
+    if (ringtoneCtx) { try { ringtoneCtx.close(); } catch {} ringtoneCtx = null; }
+}
 
-const CALL_POLL_MS       = 1000;
-const CALL_TIMEOUT_MS    = 30000; // 30s sonnerie max
-const MAX_RECONNECT      = 3;
-const ICE_SERVERS = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' }
-];
-
-// ============================================================
-// APPELS — UI helpers
-// ============================================================
 function showCallScreen(mode) {
-    // mode: 'calling' | 'ringing' | 'active' | 'reconnecting'
-    const screen = document.getElementById('call-screen');
     const overlay = document.getElementById('call-overlay');
-    if (!screen || !overlay) return;
-
+    if (!overlay) return;
     const peerName = users[callPeerUserId]?.username || 'Inconnu';
     document.getElementById('call-peer-name').textContent = peerName;
     document.getElementById('call-peer-avatar').textContent = peerName.charAt(0).toUpperCase();
-
-    // Status text
     const statusEl = document.getElementById('call-status-text');
     const timerEl  = document.getElementById('call-timer-display');
-
     if (mode === 'calling') {
         statusEl.textContent = 'Appel en cours…';
         timerEl.style.display = 'none';
@@ -1241,34 +1765,24 @@ function showCallScreen(mode) {
         document.getElementById('call-btn-hangup').style.display = 'flex';
         document.getElementById('call-controls-group').style.display = 'flex';
     }
-
     overlay.style.display = 'flex';
     requestAnimationFrame(() => overlay.classList.add('visible'));
 }
-
 function hideCallScreen() {
     const overlay = document.getElementById('call-overlay');
     if (!overlay) return;
     overlay.classList.remove('visible');
     setTimeout(() => { overlay.style.display = 'none'; }, 400);
-    stopCallTimer();
-    stopRingtone();
+    stopCallTimer(); stopRingtone();
 }
-
 function updateCallButtonState() {
     const btn = document.getElementById('call-audio-btn');
     if (!btn) return;
     const selId = userSelect.value;
-    if (!currentUserId || !selId || selId === String(currentUserId)) {
-        btn.style.display = 'none';
-    } else {
-        btn.style.display = 'flex';
-    }
+    btn.style.display = (currentUserId && selId && selId !== String(currentUserId)) ? 'flex' : 'none';
 }
-
 function startCallTimer() {
-    callDuration = 0;
-    clearInterval(callTimer);
+    callDuration = 0; clearInterval(callTimer);
     callTimer = setInterval(() => {
         callDuration++;
         const m = Math.floor(callDuration / 60).toString().padStart(2, '0');
@@ -1277,499 +1791,213 @@ function startCallTimer() {
         if (el) el.textContent = `${m}:${s}`;
     }, 1000);
 }
-
 function stopCallTimer() {
-    clearInterval(callTimer);
-    callTimer = null;
-    callDuration = 0;
+    clearInterval(callTimer); callTimer = null; callDuration = 0;
     const el = document.getElementById('call-timer-display');
     if (el) el.textContent = '00:00';
 }
-
-// ============================================================
-// APPELS — Sonnerie synthétique (Web Audio)
-// ============================================================
-function startRingtone(type) {
-    stopRingtone();
-    try {
-        ringtoneCtx = new (window.AudioContext || window.webkitAudioContext)();
-    } catch { return; }
-
-    function playTone(freq, duration, startTime) {
-        if (!ringtoneCtx) return;
-        const osc  = ringtoneCtx.createOscillator();
-        const gain = ringtoneCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0, startTime);
-        gain.gain.linearRampToValueAtTime(0.18, startTime + 0.02);
-        gain.gain.linearRampToValueAtTime(0.18, startTime + duration - 0.02);
-        gain.gain.linearRampToValueAtTime(0, startTime + duration);
-        osc.connect(gain);
-        gain.connect(ringtoneCtx.destination);
-        osc.start(startTime);
-        osc.stop(startTime + duration);
-    }
-
-    if (type === 'incoming') {
-        // Double bip répété
-        function playIncomingCycle() {
-            if (!ringtoneCtx || callState === 'idle') return;
-            const now = ringtoneCtx.currentTime;
-            playTone(880, 0.3, now);
-            playTone(660, 0.3, now + 0.35);
-        }
-        playIncomingCycle();
-        ringtoneInterval = setInterval(playIncomingCycle, 2000);
-    } else {
-        // Bip unique répété (sonnerie sortante)
-        function playOutgoingCycle() {
-            if (!ringtoneCtx || callState === 'idle') return;
-            const now = ringtoneCtx.currentTime;
-            playTone(440, 0.5, now);
-        }
-        playOutgoingCycle();
-        ringtoneInterval = setInterval(playOutgoingCycle, 3000);
-    }
-}
-
-function stopRingtone() {
-    clearInterval(ringtoneInterval);
-    ringtoneInterval = null;
-    if (ringtoneCtx) {
-        try { ringtoneCtx.close(); } catch {}
-        ringtoneCtx = null;
-    }
-}
-
-// ============================================================
-// APPELS — Supabase signalisation
-// ============================================================
-async function createCallRecord(callerId, calleeId) {
-    const r = await fetch(`${supabaseUrl}/rest/v1/calls`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=representation' },
-        body: JSON.stringify({ caller_id: callerId, callee_id: calleeId, status: 'ringing' })
-    });
-    if (!r.ok) { console.error('createCallRecord:', await r.json()); return null; }
-    const data = await r.json();
-    return Array.isArray(data) ? data[0] : data;
-}
-
-async function updateCallRecord(callId, patch) {
-    await fetch(`${supabaseUrl}/rest/v1/calls?id=eq.${callId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' },
-        body: JSON.stringify({ ...patch, updated_at: new Date().toISOString() })
-    }).catch(() => {});
-}
-
-async function getCallRecord(callId) {
-    const r = await fetch(`${supabaseUrl}/rest/v1/calls?id=eq.${callId}&select=*`, {
-        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` }
-    });
-    if (!r.ok) return null;
-    const data = await r.json();
-    return data.length > 0 ? data[0] : null;
-}
-
-async function checkIncomingCalls() {
-    if (!currentUserId || callState !== 'idle') return;
-    try {
-        // Appels entrants actifs récents (moins de 35s)
-        const since = new Date(Date.now() - 35000).toISOString();
-        const r = await fetch(
-            `${supabaseUrl}/rest/v1/calls?callee_id=eq.${currentUserId}&status=eq.ringing&created_at=gte.${since}&select=*&order=created_at.desc&limit=1`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
-        );
-        if (!r.ok) return;
-        const data = await r.json();
-        if (data.length > 0) {
-            const call = data[0];
-            // Éviter de répondre à un appel qu'on a déjà traité
-            if (call.id !== currentCallId) {
-                handleIncomingCall(call);
-            }
-        }
-    } catch {}
-}
-
-// ============================================================
-// APPELS — WebRTC
-// ============================================================
 async function getLocalStream() {
     if (localStream && localStream.active) return localStream;
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     return localStream;
 }
-
 function releaseLocalStream() {
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
 }
-
 function buildPeerConnection() {
-    if (peerConnection) {
-        try { peerConnection.close(); } catch {}
-        peerConnection = null;
-    }
-
+    if (peerConnection) { try { peerConnection.close(); } catch {} peerConnection = null; }
     peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
     peerConnection.onicecandidate = async (event) => {
-        if (!event.candidate || !currentCallId) return;
-        // Stocker les ICE candidates dans Supabase
-        const call = await getCallRecord(currentCallId);
-        if (!call) return;
-        const isCallerRole = String(call.caller_id) === String(currentUserId);
-        const field = isCallerRole ? 'ice_candidates_caller' : 'ice_candidates_callee';
-        const existing = call[field] || [];
-        existing.push(event.candidate.toJSON());
-        await updateCallRecord(currentCallId, { [field]: existing });
+        if (!event.candidate || !callPeerUserId) return;
+        await sendCallSignal(callPeerUserId, {
+            type: 'ice_candidate',
+            candidate: event.candidate.toJSON(),
+            callId: currentCallId,
+            callerId: currentUserId
+        });
     };
-
     peerConnection.ontrack = (event) => {
-        if (!remoteAudio) {
-            remoteAudio = new Audio();
-            remoteAudio.autoplay = true;
-        }
+        if (!remoteAudio) { remoteAudio = new Audio(); remoteAudio.autoplay = true; }
         remoteAudio.srcObject = event.streams[0];
     };
-
     peerConnection.onconnectionstatechange = () => {
         const state = peerConnection?.connectionState;
-        console.log('[Call] connection state:', state);
         if (state === 'connected') {
             callReconnectAttempts = 0;
-            if (callState !== 'active') {
-                callState = 'active';
-                showCallScreen('active');
-            }
+            if (callState !== 'active') { callState = 'active'; showCallScreen('active'); }
         } else if (state === 'disconnected' || state === 'failed') {
             handleCallDisconnect();
         }
     };
-
     peerConnection.oniceconnectionstatechange = () => {
-        const state = peerConnection?.iceConnectionState;
-        console.log('[Call] ICE state:', state);
-        if (state === 'failed') handleCallDisconnect();
+        if (peerConnection?.iceConnectionState === 'failed') handleCallDisconnect();
     };
-
     return peerConnection;
 }
 
-async function applyRemoteIceCandidates(candidates) {
-    if (!peerConnection || !candidates || !candidates.length) return;
-    for (const cand of candidates) {
-        try {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(cand));
-        } catch (e) { console.warn('[Call] ICE candidate error:', e); }
-    }
-}
-
-// ============================================================
-// APPELS — Initier un appel (caller)
-// ============================================================
 async function initiateCall() {
-    if (!currentUserId || !userSelect.value) return;
-    if (callState !== 'idle') return;
+    if (!currentUserId || !userSelect.value || callState !== 'idle') return;
     const calleeId = userSelect.value;
     if (String(calleeId) === String(currentUserId)) return;
-
-    callState = 'calling';
-    callPeerUserId = calleeId;
-    callReconnectAttempts = 0;
-
-    // Créer l'enregistrement d'appel
-    const callRecord = await createCallRecord(currentUserId, calleeId);
-    if (!callRecord) { callState = 'idle'; alert('Impossible d\'initier l\'appel.'); return; }
-    currentCallId = callRecord.id;
-
+    callState = 'calling'; callPeerUserId = calleeId; callReconnectAttempts = 0;
+    // Générer un ID d'appel local
+    currentCallId = crypto.randomUUID();
     showCallScreen('calling');
-
-    // Récupérer le micro
     let stream;
-    try {
-        stream = await getLocalStream();
-    } catch {
-        await updateCallRecord(currentCallId, { status: 'ended' });
-        callState = 'idle'; currentCallId = null;
-        hideCallScreen();
-        alert('Microphone inaccessible.');
-        return;
+    try { stream = await getLocalStream(); } catch {
+        callState = 'idle'; currentCallId = null; hideCallScreen(); alert('Microphone inaccessible.'); return;
     }
-
-    // Créer la connexion WebRTC
     const pc = buildPeerConnection();
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-    // Créer l'offre SDP
     const offer = await pc.createOffer({ offerToReceiveAudio: true });
     await pc.setLocalDescription(offer);
-
-    // Publier l'offre
-    await updateCallRecord(currentCallId, { offer: { type: offer.type, sdp: offer.sdp } });
-
+    // Envoyer l'offre via Broadcast — aucune écriture DB
+    await sendCallSignal(calleeId, {
+        type: 'incoming',
+        callId: currentCallId,
+        callerId: currentUserId,
+        offer: { type: offer.type, sdp: offer.sdp }
+    });
     // Timeout si pas de réponse
-    const callTimeout = setTimeout(async () => {
+    setTimeout(async () => {
         if (callState === 'calling') {
-            await updateCallRecord(currentCallId, { status: 'ended' });
+            await sendCallSignal(calleeId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
             endCall(false);
             alert('Pas de réponse.');
         }
     }, CALL_TIMEOUT_MS);
-
-    // Polling pour la réponse
-    startCallPolling(async (call) => {
-        if (!call) { clearTimeout(callTimeout); endCall(false); return; }
-
-        if (call.status === 'rejected') {
-            clearTimeout(callTimeout);
-            endCall(false);
-            showCallEndedBrief('Appel refusé');
-            return;
-        }
-        if (call.status === 'ended') {
-            clearTimeout(callTimeout);
-            endCall(false);
-            return;
-        }
-
-        // L'appelé a répondu (answer SDP disponible)
-        if (call.answer && !peerConnection.currentRemoteDescription) {
-            clearTimeout(callTimeout);
-            callState = 'active';
-            try {
-                await pc.setRemoteDescription(new RTCSessionDescription(call.answer));
-                // Appliquer les ICE candidates de l'appelé
-                await applyRemoteIceCandidates(call.ice_candidates_callee);
-            } catch (e) { console.error('[Call] setRemoteDescription:', e); }
-        }
-
-        // Vérifier nouveaux ICE candidates
-        if (call.ice_candidates_callee?.length) {
-            await applyRemoteIceCandidates(call.ice_candidates_callee);
-        }
-    });
-}
-
-// ============================================================
-// APPELS — Répondre à un appel (callee)
-// ============================================================
-function handleIncomingCall(call) {
-    if (callState !== 'idle') return;
-    callState = 'ringing';
-    currentCallId = call.id;
-    callPeerUserId = call.caller_id;
-    callReconnectAttempts = 0;
-
-    showCallScreen('ringing');
 }
 
 async function acceptCall() {
     if (callState !== 'ringing' || !currentCallId) return;
-    callState = 'active';
-    stopRingtone();
-
-    // Récupérer l'offre
-    const call = await getCallRecord(currentCallId);
-    if (!call || !call.offer || call.status === 'ended') {
-        endCall(false); return;
-    }
-
-    // Récupérer le micro
+    callState = 'active'; stopRingtone();
+    // Récupérer l'offre depuis le signal déjà reçu (stockée dans _pendingOffer)
+    const offer = _pendingCallOffer;
+    if (!offer) { endCall(false); return; }
     let stream;
-    try {
-        stream = await getLocalStream();
-    } catch {
-        await updateCallRecord(currentCallId, { status: 'ended' });
+    try { stream = await getLocalStream(); } catch {
         callState = 'idle'; hideCallScreen(); alert('Microphone inaccessible.'); return;
     }
-
     const pc = buildPeerConnection();
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-    // Appliquer l'offre
-    await pc.setRemoteDescription(new RTCSessionDescription(call.offer));
-
-    // Créer la réponse SDP
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-
-    // Marquer comme actif + publier l'answer
-    await updateCallRecord(currentCallId, {
-        status: 'active',
+    // Envoyer la réponse via Broadcast
+    await sendCallSignal(callPeerUserId, {
+        type: 'answer',
+        callId: currentCallId,
         answer: { type: answer.type, sdp: answer.sdp }
     });
-
-    // Appliquer les ICE candidates du caller
-    await applyRemoteIceCandidates(call.ice_candidates_caller);
-
     showCallScreen('active');
+}
 
-    // Polling pour les ICE candidates du caller
-    startCallPolling(async (callData) => {
-        if (!callData || callData.status === 'ended') { endCall(false); return; }
-        if (callData.ice_candidates_caller?.length) {
-            await applyRemoteIceCandidates(callData.ice_candidates_caller);
-        }
-    });
+let _pendingCallOffer = null;
+
+// Override handleCallSignal pour stocker l'offre
+const _origHandleCallSignal = handleCallSignal;
+// Redéfinition pour stocker l'offre SDP
+function handleCallSignal(payload) { // eslint-disable-line no-func-assign
+    if (payload.type === 'incoming' && callState === 'idle') {
+        callState    = 'ringing';
+        currentCallId   = payload.callId;
+        callPeerUserId  = payload.callerId;
+        _pendingCallOffer = payload.offer;
+        showCallScreen('ringing');
+        return;
+    }
+    if (payload.type === 'rejected' && callState === 'calling') {
+        endCall(false); showCallEndedBrief('Appel refusé'); return;
+    }
+    if (payload.type === 'ended') {
+        if (callState !== 'idle') endCall(false); return;
+    }
+    if (payload.type === 'answer' && peerConnection) {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer))
+            .then(() => { callState = 'active'; showCallScreen('active'); })
+            .catch(e => console.error('[Call] setRemoteDescription:', e));
+        return;
+    }
+    if (payload.type === 'ice_candidate' && peerConnection) {
+        peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {});
+    }
 }
 
 async function rejectCall() {
-    if (!currentCallId) return;
+    if (!callPeerUserId) return;
     stopRingtone();
-    await updateCallRecord(currentCallId, { status: 'rejected' });
-    callState = 'idle';
-    currentCallId = null;
-    callPeerUserId = null;
+    await sendCallSignal(callPeerUserId, { type: 'rejected', callId: currentCallId, callerId: currentUserId });
+    callState = 'idle'; currentCallId = null; callPeerUserId = null; _pendingCallOffer = null;
     hideCallScreen();
 }
-
-// ============================================================
-// APPELS — Terminer / Raccrocher
-// ============================================================
 async function hangUp() {
-    if (!currentCallId) return;
-    await updateCallRecord(currentCallId, { status: 'ended' });
+    if (!callPeerUserId) return;
+    await sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
     endCall(true);
 }
-
 function endCall(showBrief = false) {
-    stopCallPolling();
-    stopRingtone();
-    stopCallTimer();
-
-    if (peerConnection) {
-        try { peerConnection.close(); } catch {}
-        peerConnection = null;
-    }
+    stopCallPolling(); stopRingtone(); stopCallTimer();
+    if (peerConnection) { try { peerConnection.close(); } catch {} peerConnection = null; }
     releaseLocalStream();
     if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio = null; }
-
-    callState = 'idle';
-    currentCallId = null;
-    callPeerUserId = null;
-    callReconnectAttempts = 0;
-    isMuted = false;
-    isSpeakerOn = false;
-
+    callState = 'idle'; currentCallId = null; callPeerUserId = null;
+    callReconnectAttempts = 0; isMuted = false; isSpeakerOn = false;
+    _pendingCallOffer = null;
     hideCallScreen();
-
-    // Remettre les boutons de contrôle à l'état par défaut
-    updateMuteButton();
-    updateSpeakerButton();
+    updateMuteButton(); updateSpeakerButton();
 }
-
 function showCallEndedBrief(message) {
     const statusEl = document.getElementById('call-status-text');
-    if (statusEl) {
-        statusEl.textContent = message;
-        setTimeout(hideCallScreen, 1500);
-    } else {
-        hideCallScreen();
-    }
+    if (statusEl) { statusEl.textContent = message; setTimeout(hideCallScreen, 1500); }
+    else hideCallScreen();
 }
-
-// ============================================================
-// APPELS — Reconnexion
-// ============================================================
 async function handleCallDisconnect() {
     if (callState === 'idle' || callState === 'reconnecting') return;
     if (callReconnectAttempts >= MAX_RECONNECT) {
-        console.warn('[Call] Max reconnect attempts reached');
-        if (currentCallId) await updateCallRecord(currentCallId, { status: 'ended' });
-        endCall(false);
-        showCallEndedBrief('Appel interrompu');
-        return;
+        if (callPeerUserId) await sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
+        endCall(false); showCallEndedBrief('Appel interrompu'); return;
     }
-    callReconnectAttempts++;
-    callState = 'reconnecting';
-    showCallScreen('reconnecting');
-    console.log(`[Call] Reconnect attempt ${callReconnectAttempts}/${MAX_RECONNECT}`);
-
-    // Attendre 2s puis relancer ICE restart
+    callReconnectAttempts++; callState = 'reconnecting'; showCallScreen('reconnecting');
     setTimeout(async () => {
         if (callState !== 'reconnecting' || !peerConnection) return;
         try {
             const offer = await peerConnection.createOffer({ iceRestart: true });
             await peerConnection.setLocalDescription(offer);
-            await updateCallRecord(currentCallId, { offer: { type: offer.type, sdp: offer.sdp } });
-        } catch (e) {
-            console.error('[Call] ICE restart failed:', e);
-        }
+            if (callPeerUserId) await sendCallSignal(callPeerUserId, { type: 'incoming', callId: currentCallId, callerId: currentUserId, offer: { type: offer.type, sdp: offer.sdp } });
+        } catch (e) { console.error('[Call] ICE restart:', e); }
     }, 2000);
 }
+// callPollInterval n'est plus utilisé (remplacé par Broadcast)
+function startCallPolling() {}
+function stopCallPolling() { clearInterval(callPollInterval); callPollInterval = null; }
 
-// ============================================================
-// APPELS — Polling signalisation
-// ============================================================
-function startCallPolling(callback) {
-    stopCallPolling();
-    callPollInterval = setInterval(async () => {
-        if (!currentCallId) return;
-        const call = await getCallRecord(currentCallId);
-        await callback(call);
-    }, CALL_POLL_MS);
-}
-
-function stopCallPolling() {
-    clearInterval(callPollInterval);
-    callPollInterval = null;
-}
-
-// ============================================================
-// APPELS — Contrôles (mute, speaker)
-// ============================================================
 function toggleMute() {
     isMuted = !isMuted;
-    if (localStream) {
-        localStream.getAudioTracks().forEach(track => { track.enabled = !isMuted; });
-    }
+    if (localStream) localStream.getAudioTracks().forEach(track => { track.enabled = !isMuted; });
     updateMuteButton();
 }
-
 function updateMuteButton() {
     const btn = document.getElementById('call-btn-mute');
     if (!btn) return;
-    if (isMuted) {
-        btn.classList.add('active');
-        btn.innerHTML = `<span class="call-btn-icon">🔇</span><span class="call-btn-label">Muet</span>`;
-    } else {
-        btn.classList.remove('active');
-        btn.innerHTML = `<span class="call-btn-icon">🎤</span><span class="call-btn-label">Micro</span>`;
-    }
+    if (isMuted) { btn.classList.add('active'); btn.innerHTML = `<span class="call-btn-icon">🔇</span><span class="call-btn-label">Muet</span>`; }
+    else         { btn.classList.remove('active'); btn.innerHTML = `<span class="call-btn-icon">🎤</span><span class="call-btn-label">Micro</span>`; }
 }
-
 function toggleSpeaker() {
     isSpeakerOn = !isSpeakerOn;
-    if (remoteAudio) {
-        // Sur mobile, setSinkId peut orienter vers haut-parleur
-        if (remoteAudio.setSinkId) {
-            // Non garanti sur tous les navigateurs
-        }
-        remoteAudio.volume = isSpeakerOn ? 1.0 : 0.7;
-    }
+    if (remoteAudio) remoteAudio.volume = isSpeakerOn ? 1.0 : 0.7;
     updateSpeakerButton();
 }
-
 function updateSpeakerButton() {
     const btn = document.getElementById('call-btn-speaker');
     if (!btn) return;
-    if (isSpeakerOn) {
-        btn.classList.add('active');
-        btn.innerHTML = `<span class="call-btn-icon">🔊</span><span class="call-btn-label">HP actif</span>`;
-    } else {
-        btn.classList.remove('active');
-        btn.innerHTML = `<span class="call-btn-icon">🔈</span><span class="call-btn-label">HP</span>`;
-    }
+    if (isSpeakerOn) { btn.classList.add('active'); btn.innerHTML = `<span class="call-btn-icon">🔊</span><span class="call-btn-label">HP actif</span>`; }
+    else             { btn.classList.remove('active'); btn.innerHTML = `<span class="call-btn-icon">🔈</span><span class="call-btn-label">HP</span>`; }
 }
 
 // ============================================================
 // APPELS — Injection UI
 // ============================================================
 function injectCallUI() {
-    // Bouton appel dans la barre user-selection
     const userSelectionEl = document.querySelector('.user-selection');
     if (userSelectionEl) {
         const callBtn = document.createElement('button');
@@ -1781,29 +2009,22 @@ function injectCallUI() {
         callBtn.addEventListener('click', initiateCall);
         userSelectionEl.appendChild(callBtn);
     }
-
-    // Overlay d'appel (plein écran dans le chat-container)
     const overlay = document.createElement('div');
     overlay.id = 'call-overlay';
     overlay.style.display = 'none';
     overlay.innerHTML = `
         <div id="call-screen">
-            <!-- Avatar animé -->
             <div class="call-avatar-wrap">
                 <div class="call-avatar-ring call-avatar-ring--1"></div>
                 <div class="call-avatar-ring call-avatar-ring--2"></div>
                 <div class="call-avatar-ring call-avatar-ring--3"></div>
                 <div class="call-avatar" id="call-peer-avatar">?</div>
             </div>
-
-            <!-- Info -->
             <div class="call-info">
                 <div class="call-peer-name" id="call-peer-name">…</div>
                 <div class="call-status-text" id="call-status-text">Appel en cours…</div>
                 <div class="call-timer-display" id="call-timer-display" style="display:none;">00:00</div>
             </div>
-
-            <!-- Contrôles actifs (mute, speaker) -->
             <div class="call-controls-group" id="call-controls-group" style="display:none;">
                 <button class="call-ctrl-btn" id="call-btn-mute">
                     <span class="call-btn-icon">🎤</span>
@@ -1814,8 +2035,6 @@ function injectCallUI() {
                     <span class="call-btn-label">HP</span>
                 </button>
             </div>
-
-            <!-- Boutons d'action principaux -->
             <div class="call-actions">
                 <button class="call-action-btn call-action-accept" id="call-btn-accept">
                     <span>📞</span>
@@ -1827,363 +2046,24 @@ function injectCallUI() {
                     <span>📵</span>
                 </button>
             </div>
-
-            <!-- Labels sous boutons d'action -->
-            <div class="call-action-labels" id="call-action-labels">
-                <span class="call-action-label" id="call-label-accept" style="display:none;">Accepter</span>
-                <span class="call-action-label" id="call-label-reject" style="display:none;">Refuser</span>
+            <div class="call-action-labels">
+                <span class="call-action-label" id="call-label-accept">Accepter</span>
+                <span class="call-action-label" id="call-label-reject">Refuser</span>
                 <span class="call-action-label" id="call-label-hangup" style="display:none;">Raccrocher</span>
             </div>
-        </div>
-    `;
-
+        </div>`;
     document.body.appendChild(overlay);
-
-    // Événements
     document.getElementById('call-btn-accept').addEventListener('click', acceptCall);
     document.getElementById('call-btn-reject').addEventListener('click', rejectCall);
     document.getElementById('call-btn-hangup').addEventListener('click', hangUp);
     document.getElementById('call-btn-mute').addEventListener('click', toggleMute);
     document.getElementById('call-btn-speaker').addEventListener('click', toggleSpeaker);
-
-    // Synchroniser les labels
-    syncCallActionLabels();
 }
 
-function syncCallActionLabels() {
-    // Les labels sont gérés directement dans showCallScreen via style.display
-    const acceptBtn = document.getElementById('call-btn-accept');
-    const rejectBtn = document.getElementById('call-btn-reject');
-    const hangupBtn = document.getElementById('call-btn-hangup');
-    // Observer les changements de display
-    const observer = new MutationObserver(() => {
-        const lAccept = document.getElementById('call-label-accept');
-        const lReject = document.getElementById('call-label-reject');
-        const lHangup = document.getElementById('call-label-hangup');
-        if (!lAccept || !lReject || !lHangup) return;
-        lAccept.style.display = acceptBtn.style.display !== 'none' ? 'block' : 'none';
-        lReject.style.display = rejectBtn.style.display !== 'none' ? 'block' : 'none';
-        lHangup.style.display = hangupBtn.style.display !== 'none' ? 'block' : 'none';
-    });
-    if (acceptBtn) observer.observe(acceptBtn, { attributes: true, attributeFilter: ['style'] });
-}
-
-// ============================================================
-// MESSAGES — Récupération et affichage
-// ============================================================
-async function deleteMessage(messageId) {
-    const r = await fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`,
-        { method: 'DELETE', headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-    if (r.ok) getMessages();
-    else console.error('deleteMessage:', await r.json());
-}
-
-async function getMessages() {
-    if (!currentUserId || !userSelect.value) { chatMessages.innerHTML = ''; currentMessages = []; lastMessageCount = 0; return; }
-    const query = `${supabaseUrl}/rest/v1/messages?select=*&order=created_at.asc` +
-        `&or=(and(id_sent.eq.${currentUserId},id_received.eq.${userSelect.value}),` +
-        `and(id_sent.eq.${userSelect.value},id_received.eq.${currentUserId}))`;
-    const r = await fetch(query, { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-    const data = await r.json();
-    if (!r.ok) { console.error('getMessages:', data); return; }
-
-    if (data.length > lastMessageCount && lastMessageCount > 0) {
-        data.slice(lastMessageCount).forEach(msg => {
-            if (msg.id_sent === userSelect.value && msg.id_received === currentUserId) {
-                const voiceData = parseVoiceMessage(msg.content);
-                const preview = voiceData ? '🎙️ Message vocal' : msg.content.substring(0, 50);
-                showNotification(`Nouveau message de ${users[msg.id_sent]?.username || 'quelqu\'un'}`, preview);
-            }
-        });
-    }
-    lastMessageCount = data.length;
-    await markMessagesAsRead();
-
-    const hasChanges = data.length !== currentMessages.length ||
-        data.some((m, i) => m.id !== currentMessages[i]?.id || m.read_at !== currentMessages[i]?.read_at);
-    if (!hasChanges) return;
-
-    const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
-    currentMessages = data;
-    renderMessages(data);
-    if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
-    if (data.length > 0) generateQuickReplies(data[data.length - 1]);
-}
-
-function renderMessages(data) {
-    chatMessages.innerHTML = '';
-    let lastDate = null;
-    const fragment = document.createDocumentFragment();
-
-    data.forEach(message => {
-        const dateObj  = new Date(message.created_at);
-        const msgDate  = dateObj.toLocaleDateString('fr-FR');
-        const msgTime  = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-        const isMine   = message.id_sent === currentUserId;
-        const sender   = users[message.id_sent]?.username || 'Inconnu';
-        const voiceData = parseVoiceMessage(message.content);
-
-        if (msgDate !== lastDate) {
-            const el = document.createElement('div');
-            el.className = 'date'; el.textContent = msgDate;
-            fragment.appendChild(el); lastDate = msgDate;
-        }
-
-        const msgEl = document.createElement('div');
-        msgEl.classList.add('message', isMine ? 'sent' : 'received');
-        if (voiceData) msgEl.classList.add('voice-msg');
-
-        const senderSpan = document.createElement('span');
-        senderSpan.className = 'msg-sender'; senderSpan.textContent = sender;
-
-        const metaSpan = document.createElement('span');
-        metaSpan.className = 'msg-meta';
-        let metaText = message.city ? `📍 ${message.city} · ${msgTime}` : msgTime;
-        if (isMine) {
-            if (message.read_at) { metaText += ' · 👁️ Lu'; metaSpan.classList.add('read'); }
-            else                  { metaText += ' · ✓ Envoyé'; metaSpan.classList.add('sent-status'); }
-        }
-        metaSpan.textContent = metaText;
-
-        msgEl.appendChild(senderSpan);
-
-        if (voiceData) {
-            const player = createVoiceMessagePlayer(voiceData, isMine);
-            msgEl.appendChild(player);
-        } else {
-            msgEl.appendChild(document.createTextNode(message.content));
-        }
-
-        msgEl.appendChild(metaSpan);
-
-        if (isMine) {
-            const del = document.createElement('span');
-            del.textContent = '✖'; del.className = 'delete-button';
-            del.addEventListener('click', () => deleteMessage(message.id));
-            msgEl.appendChild(del);
-        }
-        fragment.appendChild(msgEl);
-    });
-
-    chatMessages.appendChild(fragment);
-}
-
-function appendOptimisticMessage(content) {
-    const now = new Date();
-    const msgTime = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    const msgDate = now.toLocaleDateString('fr-FR');
-
-    const lastDateEl = chatMessages.querySelector('.date:last-of-type');
-    if (!lastDateEl || lastDateEl.textContent !== msgDate) {
-        const dateEl = document.createElement('div');
-        dateEl.className = 'date'; dateEl.textContent = msgDate;
-        chatMessages.appendChild(dateEl);
-    }
-
-    const voiceData = parseVoiceMessage(content);
-    const msgEl = document.createElement('div');
-    msgEl.classList.add('message', 'sent', 'optimistic');
-    if (voiceData) msgEl.classList.add('voice-msg');
-
-    const senderSpan = document.createElement('span');
-    senderSpan.className = 'msg-sender';
-    senderSpan.textContent = users[currentUserId]?.username || 'Moi';
-
-    const metaSpan = document.createElement('span');
-    metaSpan.className = 'msg-meta';
-    metaSpan.textContent = `${msgTime} · ⏳`;
-
-    msgEl.appendChild(senderSpan);
-
-    if (voiceData) {
-        const player = createVoiceMessagePlayer(voiceData, true);
-        msgEl.appendChild(player);
-    } else {
-        msgEl.appendChild(document.createTextNode(content));
-    }
-
-    msgEl.appendChild(metaSpan);
-    chatMessages.appendChild(msgEl);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    return msgEl;
-}
-
-function refreshMessages() {
-    if (refreshInterval) clearInterval(refreshInterval);
-    refreshInterval = setInterval(() => {
-        Promise.all([getMessages(), checkTypingStatus(), checkIncomingCalls()]);
-    }, 1000);
-}
-
-// ============================================================
-// ENVOI DE MESSAGES — Optimisé
-// ============================================================
-async function sendMessage(userId, content) {
-    const isVoice = content.startsWith('{"type":"__voice__"');
-
-    let optimisticEl = null;
-    if (!isVoice) {
-        optimisticEl = appendOptimisticMessage(content);
-    }
-
-    isTyping = false;
-    clearTimeout(typingTimeout);
-    updateTypingStatus(false);
-
-    const postBody = {
-        id_sent:     userId,
-        content:     content,
-        created_at:  new Date().toISOString(),
-        id_received: userSelect.value,
-        read_at:     null,
-        latitude:    null,
-        longitude:   null,
-        city:        null
-    };
-
-    let messageId = null;
-    try {
-        const r = await fetch(`${supabaseUrl}/rest/v1/messages`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                apikey: supabaseKey,
-                Authorization: `Bearer ${supabaseKey}`,
-                Prefer: 'return=representation'
-            },
-            body: JSON.stringify(postBody)
-        });
-
-        if (r.ok) {
-            const inserted = await r.json();
-            messageId = Array.isArray(inserted) ? inserted[0]?.id : inserted?.id;
-
-            if (optimisticEl) optimisticEl.remove();
-            getMessages();
-
-            if (messageId) {
-                getGeolocationCached().then(async geo => {
-                    const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
-                    if (!city && !geo.latitude) return;
-                    fetch(`${supabaseUrl}/rest/v1/messages?id=eq.${messageId}`, {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json', apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Prefer: 'return=minimal' },
-                        body: JSON.stringify({ latitude: geo.latitude, longitude: geo.longitude, city })
-                    }).catch(() => {});
-                }).catch(() => {});
-            }
-
-            return true;
-        } else {
-            console.error('sendMessage:', await r.json());
-            if (optimisticEl) optimisticEl.remove();
-        }
-    } catch (e) {
-        console.error('sendMessage:', e);
-        if (optimisticEl) optimisticEl.remove();
-    }
-    return false;
-}
-
-async function handleSend() {
-    if (!currentUserId) { alert('Veuillez vous connecter pour envoyer un message'); return; }
-    const content = messageInput.value.trim();
-    if (!content) return;
-
-    messageInput.value = '';
-    messageInput.focus();
-    quickReplies.style.display = 'none';
-    rawInputText = ''; prevConvertedValue = '';
-
-    await sendMessage(currentUserId, content);
-}
-
-sendButton.addEventListener('click', handleSend);
-messageInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } });
-
-// ============================================================
-// CONNEXION
-// ============================================================
-async function completeLogin(user, plainPassword) {
-    currentUserId = user.id;
-    users[user.id] = { id: user.id, username: user.username };
-    loginContainer.style.display  = 'none';
-    connectedUser.style.display   = 'flex';
-    connectedUsername.textContent  = user.username;
-    saveSession({ userId: user.id, username: user.username, plainPassword, refreshToken: generateRefreshToken(), issuedAt: Date.now(), expiresAt: Date.now() + SESSION_DURATION_MS, lastValidatedAt: Date.now() });
-    await getUsers(); getMessages(); refreshMessages(); startSessionValidation(); startPresence();
-    getGeolocationCached().catch(() => {});
-}
-
-async function login() {
-    const username = loginUsername.value.trim(), password = loginPassword.value;
-    if (!username || !password) { alert('Veuillez remplir tous les champs'); return; }
-    try {
-        const r = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username,password&username=eq.${encodeURIComponent(username)}`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const data = await r.json();
-        if (!r.ok)        { alert('Erreur de connexion'); return; }
-        if (!data.length) { alert('Utilisateur non trouvé'); return; }
-        if (data[0].password !== password) { alert('Mot de passe incorrect'); return; }
-        await requestNotificationPermission();
-        await completeLogin(data[0], password);
-    } catch (e) { console.error('login:', e); alert('Erreur de connexion'); }
-}
-
-async function checkAutoLogin() {
-    const raw = localStorage.getItem('pending_auto_login');
-    if (!raw) return false;
-    localStorage.removeItem('pending_auto_login');
-    let pending; try { pending = JSON.parse(raw); } catch { return false; }
-    if (!pending?.userId || !pending?.plainPassword) return false;
-    try {
-        const r = await fetch(`${supabaseUrl}/rest/v1/users?select=id,username,password&id=eq.${pending.userId}`,
-            { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
-        const data = await r.json();
-        if (!r.ok || !data.length || data[0].password !== pending.plainPassword) return false;
-        await requestNotificationPermission();
-        await completeLogin(data[0], pending.plainPassword);
-        return true;
-    } catch { return false; }
-}
-
-// ============================================================
-// DÉCONNEXION
-// ============================================================
-async function logout(options = {}) {
-    const { silent = false, reason = '' } = options;
-    if (isTyping) await updateTypingStatus(false);
-    if (isRecording) cancelVoiceRecording();
-    if (callState !== 'idle') {
-        if (currentCallId) await updateCallRecord(currentCallId, { status: 'ended' });
-        endCall(false);
-    }
-    closeEmojiPicker(); closeFontPicker(); resetFont();
-    currentUserId = null; isTyping = false; clearTimeout(typingTimeout);
-    if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
-    stopSessionValidation(); stopPresence(); clearSession(); clearPresenceUI();
-    loginContainer.style.display  = 'block';
-    connectedUser.style.display   = 'none';
-    chatMessages.innerHTML        = '';
-    currentMessages = []; lastMessageCount = 0;
-    typingIndicator.style.display = 'none';
-    quickReplies.style.display    = 'none';
-    _geoCache = null; _geoPending = null;
-    if (!silent && reason) alert(reason);
-}
-
-loginButton.addEventListener('click', login);
-logoutButton.addEventListener('click', () => logout());
-loginPassword.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); login(); } });
-
-// ============================================================
-// INJECTION DES BOUTONS
-// ============================================================
 function injectChatInputButtons() {
     const chatInput = document.querySelector('.chat-input');
     const sendBtn   = document.getElementById('send-button');
     if (!chatInput || !sendBtn) return;
-
     const fontBtn = document.createElement('button');
     fontBtn.id = 'font-button'; fontBtn.className = 'icon-button font-button';
     fontBtn.textContent = '🔤'; fontBtn.title = 'Style de texte'; fontBtn.type = 'button';
@@ -2203,20 +2083,18 @@ window.onload = async () => {
     const autoLogged = await checkAutoLogin();
     if (!autoLogged) {
         const restored = await restoreSession();
-        if (!restored) getMessages();
+        if (!restored) {
+            // Afficher l'UI de connexion — pas de messages à charger
+            chatMessages.innerHTML = '';
+        }
     }
 };
 
-userSelect.addEventListener('change', () => {
-    currentMessages = []; lastMessageCount = 0;
-    typingIndicator.style.display = 'none';
-    quickReplies.style.display    = 'none';
-    if (currentUserId) updatePresenceUI_display();
-    getMessages();
-});
-
 window.addEventListener('beforeunload', () => {
-    if (isTyping && currentUserId) updateTypingStatus(false);
+    // Signaler le départ si un appel est en cours
+    if (callState !== 'idle' && callPeerUserId && currentCallId) {
+        sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
+    }
     if (isRecording) cancelVoiceRecording();
-    if (callState !== 'idle' && currentCallId) updateCallRecord(currentCallId, { status: 'ended' });
+    // Les canaux Realtime sont fermés automatiquement par le navigateur (WS close)
 });
