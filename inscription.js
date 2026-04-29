@@ -12,6 +12,7 @@ const confettiCanvas     = document.getElementById('confetti-canvas');
 // ============================================================
 // ERROR / UI HELPERS
 // ============================================================
+
 function showError(message) {
     regError.textContent = message;
     regError.style.display = 'block';
