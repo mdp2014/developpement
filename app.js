@@ -12,6 +12,7 @@
  *  - Appels WebRTC : polling léger 2 s uniquement pendant un appel actif
  */
 
+
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
 // ============================================================
