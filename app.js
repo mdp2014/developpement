@@ -19,7 +19,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 // CONFIG
 // ============================================================
 const SUPABASE_URL = 'https://ukqksglsxupbqsserylq.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvZ2x1anR2bXNscXV0amVxbXJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1ODg0OTUsImV4cCI6MjA4OTE2NDQ5NX0.uezhrVRl2FTtVRfgXBMAnxcwROUNc91ruVegsyMD38U';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVrcWtzZ2xzeHVwYnFzc2VyeWxxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc5MDYwNTMsImV4cCI6MjA5MzQ4MjA1M30.DAlc38E9sUvr9MhpHtDjP8xeT0-50ARdPMQafTsB7fo';
 
 // Client Supabase officiel — gère le WebSocket Realtime automatiquement
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
