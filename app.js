@@ -65,6 +65,7 @@ let usersWithUnread  = new Map();
 
 const SESSION_KEY    = 'session_v2';
 const SESSION_MS     = 1000 * 60 * 60 * 24 * 30;
+const WELCOME_SESSION_KEY = 'welcome_screen_shown';
 
 let _geoCache  = null;
 let _geoPend   = null;
@@ -2184,7 +2185,167 @@ function injectChatInputButtons() {
 // ============================================================
 // INIT
 // ============================================================
+function createWelcomeScreenStyles() {
+    if (document.getElementById('welcome-screen-style')) return;
+    const style = document.createElement('style');
+    style.id = 'welcome-screen-style';
+    style.textContent = `
+        body.welcome-screen-open { overflow: hidden; }
+        #welcome-screen-overlay {
+            position: fixed;
+            inset: 0;
+            background: radial-gradient(circle at top, rgba(37, 94, 255, 0.18), transparent 28%),
+                        linear-gradient(135deg, rgba(0, 0, 0, 0.9), rgba(10, 18, 35, 0.96));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            z-index: 99999;
+            color: #fff;
+        }
+        #welcome-screen-overlay::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: url('9d37a8ab76ebc8086da37442fc815b7a.gif') center / 220px no-repeat;
+            opacity: 0.08;
+            pointer-events: none;
+        }
+        .welcome-card {
+            position: relative;
+            width: min(100%, 640px);
+            padding: 32px;
+            border-radius: 28px;
+            background: rgba(7, 15, 32, 0.92);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            text-align: center;
+            overflow: hidden;
+        }
+        .welcome-card::after {
+            content: '';
+            position: absolute;
+            inset: -50%;
+            background: radial-gradient(circle, rgba(69, 103, 255, 0.12), transparent 32%);
+            pointer-events: none;
+        }
+        .welcome-card * { position: relative; z-index: 1; }
+        .welcome-title {
+            margin: 0;
+            font-size: clamp(2rem, 4vw, 3.2rem);
+            letter-spacing: -0.03em;
+            text-transform: uppercase;
+            text-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+        }
+        .welcome-text {
+            margin: 18px auto 32px;
+            max-width: 85%;
+            color: rgba(255, 255, 255, 0.85);
+            line-height: 1.7;
+            font-size: 1rem;
+        }
+        .welcome-art {
+            display: grid;
+            place-items: center;
+            margin-bottom: 28px;
+        }
+        .welcome-main-gif {
+            width: 100%;
+            max-width: 420px;
+            border-radius: 22px;
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .welcome-loader {
+            margin: 24px auto 16px;
+            width: 112px;
+            height: 112px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(255, 255, 255, 0.06);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+        }
+        .welcome-loader img {
+            width: 76px;
+            height: 76px;
+            object-fit: contain;
+            animation: welcome-pulse 1.8s ease-in-out infinite;
+        }
+        @keyframes welcome-pulse {
+            0%, 100% { transform: scale(1); opacity: 0.95; }
+            50% { transform: scale(1.06); opacity: 1; }
+        }
+        .welcome-continue-btn {
+            margin: 0 auto 8px;
+            padding: 16px 28px;
+            border: none;
+            border-radius: 999px;
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            color: #fff;
+            background: linear-gradient(135deg, #4a6dff, #2dc4ff);
+            box-shadow: 0 18px 40px rgba(42, 116, 255, 0.25);
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .welcome-continue-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 22px 48px rgba(42, 116, 255, 0.3);
+        }
+        .welcome-note {
+            margin: 0;
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.65);
+        }
+        #welcome-screen-overlay.fade-out {
+            opacity: 0;
+            transition: opacity 0.26s ease;
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function closeWelcomeScreen(overlay) {
+    if (!overlay) overlay = document.getElementById('welcome-screen-overlay');
+    if (!overlay) return;
+    overlay.classList.add('fade-out');
+    document.body.classList.remove('welcome-screen-open');
+    setTimeout(() => { overlay.remove(); }, 260);
+}
+
+function showWelcomeScreenIfNeeded() {
+    if (sessionStorage.getItem(WELCOME_SESSION_KEY)) return;
+    createWelcomeScreenStyles();
+    const overlay = document.createElement('div');
+    overlay.id = 'welcome-screen-overlay';
+    overlay.innerHTML = `
+        <div class="welcome-card">
+            <div class="welcome-art">
+                <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Bienvenue" class="welcome-main-gif">
+            </div>
+            <h1 class="welcome-title">Bienvenue sur la messagerie instantanée</h1>
+            <p class="welcome-text">Un nouveau départ à chaque ouverture du site. Clique sur Continuer pour accéder à ton espace de discussion.</p>
+            <div class="welcome-loader">
+                <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Chargement" aria-label="Chargement en cours">
+            </div>
+            <button id="welcome-continue-btn" class="welcome-continue-btn">Continuer</button>
+            <p class="welcome-note">Le loader tourne en boucle jusqu'à ce que tu appuies sur Continuer.</p>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    document.body.classList.add('welcome-screen-open');
+    const button = overlay.querySelector('#welcome-continue-btn');
+    button?.addEventListener('click', () => {
+        sessionStorage.setItem(WELCOME_SESSION_KEY, '1');
+        closeWelcomeScreen(overlay);
+    });
+}
+
 window.onload = async () => {
+    showWelcomeScreenIfNeeded();
     injectChatInputButtons();
     injectVoiceUI();
     injectFileUploadUI();
@@ -2205,112 +2366,3 @@ window.addEventListener('beforeunload', () => {
 });
 // ... (tout le code existant de app.js)
 
-// Ajoutez ce code à la fin du fichier, juste avant window.onload
-function showWelcomeScreen() {
-    const welcomeScreen = document.createElement('div');
-    welcomeScreen.id = 'welcome-screen';
-    welcomeScreen.innerHTML = `
-        <div class="welcome-content">
-            <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Bienvenue" class="welcome-gif">
-            <h1 class="welcome-title">Bienvenue dans notre messagerie instantanée</h1>
-            <p class="welcome-message">Connectez-vous pour commencer à échanger des messages</p>
-        </div>
-    `;
-    document.body.appendChild(welcomeScreen);
-
-    // Ajoutez une animation d'entrée
-    setTimeout(() => {
-        welcomeScreen.classList.add('visible');
-    }, 50);
-
-    // Cachez la page de bienvenue après 3 secondes
-    setTimeout(() => {
-        welcomeScreen.classList.remove('visible');
-        setTimeout(() => {
-            welcomeScreen.remove();
-        }, 500);
-    }, 3000);
-}
-
-// Modifiez la fonction userSelect.addEventListener pour inclure la page de bienvenue
-userSelect.addEventListener('change', async () => {
-    currentMessages = [];
-    typingIndicator.style.display = 'none';
-    quickReplies.style.display    = 'none';
-    isTyping = false; clearTimeout(typingTimeout);
-
-    // Affichez la page de bienvenue à chaque changement d'utilisateur
-    showWelcomeScreen();
-
-    if (currentUserId) {
-        subscribeToConversation();
-        subscribeToTyping();
-        await loadInitialMessages();
-        updatePresenceUI();
-    }
-});
-
-// Ajoutez du CSS pour la page de bienvenue
-const style = document.createElement('style');
-style.textContent = `
-    #welcome-screen {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(0, 0, 0, 0.8);
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        z-index: 1000;
-        opacity: 0;
-        transition: opacity 0.5s ease;
-    }
-
-    #welcome-screen.visible {
-        opacity: 1;
-    }
-
-    .welcome-content {
-        text-align: center;
-        color: white;
-        max-width: 80%;
-    }
-
-    .welcome-gif {
-        max-width: 100%;
-        height: auto;
-        border-radius: 10px;
-        box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
-        animation: pulse 2s infinite;
-    }
-
-    .welcome-title {
-        font-size: 2.5rem;
-        margin-top: 20px;
-        animation: fadeIn 1s ease;
-    }
-
-    .welcome-message {
-        font-size: 1.2rem;
-        margin-top: 10px;
-        animation: fadeIn 1.5s ease;
-    }
-
-    @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.05); }
-        100% { transform: scale(1); }
-    }
-
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(20px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-`;
-document.head.appendChild(style);
-
-window.onload = async () => {
-    // ... (le reste du code existant)
-};
