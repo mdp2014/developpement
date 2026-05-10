@@ -2203,3 +2203,114 @@ window.addEventListener('beforeunload', () => {
         sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
     if (isRecording) cancelVoiceRecording();
 });
+// ... (tout le code existant de app.js)
+
+// Ajoutez ce code à la fin du fichier, juste avant window.onload
+function showWelcomeScreen() {
+    const welcomeScreen = document.createElement('div');
+    welcomeScreen.id = 'welcome-screen';
+    welcomeScreen.innerHTML = `
+        <div class="welcome-content">
+            <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Bienvenue" class="welcome-gif">
+            <h1 class="welcome-title">Bienvenue dans notre messagerie instantanée</h1>
+            <p class="welcome-message">Connectez-vous pour commencer à échanger des messages</p>
+        </div>
+    `;
+    document.body.appendChild(welcomeScreen);
+
+    // Ajoutez une animation d'entrée
+    setTimeout(() => {
+        welcomeScreen.classList.add('visible');
+    }, 50);
+
+    // Cachez la page de bienvenue après 3 secondes
+    setTimeout(() => {
+        welcomeScreen.classList.remove('visible');
+        setTimeout(() => {
+            welcomeScreen.remove();
+        }, 500);
+    }, 3000);
+}
+
+// Modifiez la fonction userSelect.addEventListener pour inclure la page de bienvenue
+userSelect.addEventListener('change', async () => {
+    currentMessages = [];
+    typingIndicator.style.display = 'none';
+    quickReplies.style.display    = 'none';
+    isTyping = false; clearTimeout(typingTimeout);
+
+    // Affichez la page de bienvenue à chaque changement d'utilisateur
+    showWelcomeScreen();
+
+    if (currentUserId) {
+        subscribeToConversation();
+        subscribeToTyping();
+        await loadInitialMessages();
+        updatePresenceUI();
+    }
+});
+
+// Ajoutez du CSS pour la page de bienvenue
+const style = document.createElement('style');
+style.textContent = `
+    #welcome-screen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.8);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+        opacity: 0;
+        transition: opacity 0.5s ease;
+    }
+
+    #welcome-screen.visible {
+        opacity: 1;
+    }
+
+    .welcome-content {
+        text-align: center;
+        color: white;
+        max-width: 80%;
+    }
+
+    .welcome-gif {
+        max-width: 100%;
+        height: auto;
+        border-radius: 10px;
+        box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+        animation: pulse 2s infinite;
+    }
+
+    .welcome-title {
+        font-size: 2.5rem;
+        margin-top: 20px;
+        animation: fadeIn 1s ease;
+    }
+
+    .welcome-message {
+        font-size: 1.2rem;
+        margin-top: 10px;
+        animation: fadeIn 1.5s ease;
+    }
+
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+        100% { transform: scale(1); }
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+`;
+document.head.appendChild(style);
+
+window.onload = async () => {
+    // ... (le reste du code existant)
+};
