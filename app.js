@@ -2209,14 +2209,16 @@ function createWelcomeScreenStyles() {
         #welcome-screen-overlay {
             position: fixed;
             inset: 0;
+            overflow-y: auto;
             background: radial-gradient(circle at top, rgba(37, 94, 255, 0.18), transparent 28%),
-                        linear-gradient(135deg, rgba(0, 0, 0, 0.9), rgba(10, 18, 35, 0.96));
+                        linear-gradient(135deg, rgba(0, 0, 0, 0.95), rgba(7, 13, 24, 0.98));
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: 24px;
+            padding: 32px 18px;
             z-index: 99999;
             color: #fff;
+            backdrop-filter: blur(8px);
         }
         #welcome-screen-overlay::before {
             content: '';
@@ -2228,14 +2230,28 @@ function createWelcomeScreenStyles() {
         }
         .welcome-card {
             position: relative;
-            width: min(100%, 640px);
-            padding: 32px;
-            border-radius: 28px;
-            background: rgba(7, 15, 32, 0.92);
-            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            width: min(100%, 720px);
+            max-width: 720px;
+            max-height: min(92vh, 860px);
+            padding: 34px;
+            border-radius: 32px;
+            background: rgba(7, 15, 32, 0.94);
+            box-shadow: 0 32px 110px rgba(0, 0, 0, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             text-align: center;
             overflow: hidden;
+        }
+        .welcome-card-inner {
+            max-height: calc(92vh - 80px);
+            overflow-y: auto;
+            padding-right: 6px;
+        }
+        .welcome-card-inner::-webkit-scrollbar {
+            width: 6px;
+        }
+        .welcome-card-inner::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.22);
+            border-radius: 999px;
         }
         .welcome-card::after {
             content: '';
@@ -2266,10 +2282,38 @@ function createWelcomeScreenStyles() {
         }
         .welcome-main-gif {
             width: 100%;
-            max-width: 420px;
-            border-radius: 22px;
-            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+            max-width: 440px;
+            border-radius: 24px;
+            box-shadow: 0 28px 100px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            transform: translateZ(0);
+        }
+        .welcome-features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 14px;
+            margin: 0 auto 22px;
+            width: min(100%, 680px);
+            text-align: left;
+        }
+        .feature-card {
+            padding: 18px 16px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+        }
+        .feature-card strong {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.98rem;
+            color: #fff;
+        }
+        .feature-card span {
+            display: block;
+            color: rgba(255, 255, 255, 0.75);
+            font-size: 0.92rem;
+            line-height: 1.55;
         }
         .welcome-loader {
             margin: 24px auto 16px;
@@ -2338,16 +2382,32 @@ function showWelcomeScreenIfNeeded() {
     overlay.id = 'welcome-screen-overlay';
     overlay.innerHTML = `
         <div class="welcome-card">
-            <div class="welcome-art">
-                <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Bienvenue" class="welcome-main-gif">
+            <div class="welcome-card-inner">
+                <div class="welcome-art">
+                    <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Bienvenue" class="welcome-main-gif">
+                </div>
+                <h1 class="welcome-title">Bienvenue sur ta messagerie</h1>
+                <p class="welcome-text">Voici ton espace privé de discussion. Appels vidéo, envoi de fichiers, messages vocaux et chat en temps réel — tout est prêt pour toi.</p>
+                <div class="welcome-features">
+                    <div class="feature-card">
+                        <strong>📞 Appels vidéo</strong>
+                        <span>Parle en direct avec tes contacts, et bascule vers la caméra quand tu veux.</span>
+                    </div>
+                    <div class="feature-card">
+                        <strong>📁 Photos & vidéos</strong>
+                        <span>Partage tes médias directement depuis ton mobile ou ton ordi.</span>
+                    </div>
+                    <div class="feature-card">
+                        <strong>🎤 Messages vocaux</strong>
+                        <span>Enregistre et envoie un message audio sans quitter la conversation.</span>
+                    </div>
+                </div>
+                <div class="welcome-loader">
+                    <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Chargement" aria-label="Chargement en cours">
+                </div>
+                <button id="welcome-continue-btn" class="welcome-continue-btn">Continuer vers le chat</button>
+                <p class="welcome-note">Clique sur continuer quand tu es prêt. Le loader reste actif jusqu’au clic.</p>
             </div>
-            <h1 class="welcome-title">Bienvenue sur la messagerie instantanée</h1>
-            <p class="welcome-text">Un nouveau départ à chaque ouverture du site. Clique sur Continuer pour accéder à ton espace de discussion.</p>
-            <div class="welcome-loader">
-                <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Chargement" aria-label="Chargement en cours">
-            </div>
-            <button id="welcome-continue-btn" class="welcome-continue-btn">Continuer</button>
-            <p class="welcome-note">Le loader tourne en boucle jusqu'à ce que tu appuies sur Continuer.</p>
         </div>
     `;
     document.body.appendChild(overlay);
