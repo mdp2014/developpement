@@ -1,10 +1,11 @@
 /**
  * app.js — Messagerie Instantanée
  *
- * Nouveautés v2 :
- *  - Bouton caméra pendant un appel → bascule en vidéo WebRTC
- *  - Réactions emoji flottantes dans la vue appel ET vidéo
- *  - Bouton téléphone conditionnel : visible uniquement si le peer est en ligne
+ * Correctifs v3 :
+ *  - Audio WebRTC : flux remote correctement routé via remoteAudio
+ *  - Vidéo WebRTC : flux remote attaché au bon <video> element via ontrack
+ *  - Partage de fichiers (photos, vidéos, images) via Supabase Storage
+ *  - Bouton 📎 + accès caméra directe 📷 sur mobile
  */
 
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
@@ -19,6 +20,9 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
     realtime: { params: { eventsPerSecond: 10 } }
 });
+
+const FILE_BUCKET = 'chat-files';
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
 
 // ============================================================
 // REFS DOM
@@ -48,25 +52,20 @@ let currentUserId    = null;
 let currentMessages  = [];
 let emojiPickerOverlay = null;
 
-// Canaux Realtime
 let msgChannel          = null;
 let typingChannel       = null;
 let presenceChannel     = null;
 let incomingCallChannel = null;
 
-// Typing
 let typingTimeout    = null;
 let isTyping         = false;
 
-// Présence
 let onlineUsers      = new Set();
 let usersWithUnread  = new Map();
 
-// Session
 const SESSION_KEY    = 'session_v2';
 const SESSION_MS     = 1000 * 60 * 60 * 24 * 30;
 
-// Géolocalisation
 let _geoCache  = null;
 let _geoPend   = null;
 
@@ -79,7 +78,7 @@ let fontPickerEl        = null;
 let fontPickerOverlay   = null;
 
 // ============================================================
-// APPELS WEBRTC — État étendu
+// APPELS WEBRTC — État
 // ============================================================
 let callState             = 'idle';
 let currentCallId         = null;
@@ -89,7 +88,6 @@ let localStream           = null;
 let remoteAudio           = null;
 let callTimer             = null;
 let callDuration          = 0;
-let callPollInterval      = null;
 let isMuted               = false;
 let isSpeakerOn           = false;
 let callReconnectAttempts = 0;
@@ -98,9 +96,10 @@ let ringtoneCtx           = null;
 let _pendingCallOffer     = null;
 
 // Vidéo
-let isVideoEnabled     = false;   // true quand la caméra locale est active
-let remoteVideoEnabled = false;   // true quand le peer envoie de la vidéo
-let localVideoStream   = null;    // flux vidéo local séparé si nécessaire
+let isVideoEnabled     = false;
+let remoteVideoEnabled = false;
+let localVideoStream   = null;
+let currentFacingMode  = 'user';
 
 const CALL_TIMEOUT_MS = 30000;
 const MAX_RECONNECT   = 3;
@@ -110,9 +109,7 @@ const ICE_SERVERS = [
     { urls: 'stun:stun.cloudflare.com:3478' }
 ];
 
-// Réactions
 const CALL_REACTIONS = ['👍','❤️','😂','😮','🔥','👏','🥳','😢'];
-let reactionTimeout = null;
 
 // Messages vocaux
 let mediaRecorder      = null;
@@ -354,11 +351,7 @@ async function validateSession(session) {
     if (!session?.userId || !session?.expiresAt) return false;
     if (Date.now() > session.expiresAt) return false;
     try {
-        const { data, error } = await supabase
-            .from('users')
-            .select('id, username, password')
-            .eq('id', session.userId)
-            .single();
+        const { data, error } = await supabase.from('users').select('id, username, password').eq('id', session.userId).single();
         if (error || !data) return false;
         if (data.password !== session.plainPassword) return false;
         session.username = data.username;
@@ -390,25 +383,15 @@ async function restoreSession() {
 // ============================================================
 function subscribeToPresence() {
     if (presenceChannel) { supabase.removeChannel(presenceChannel); presenceChannel = null; }
-
-    presenceChannel = supabase.channel('online-users', {
-        config: { presence: { key: currentUserId } }
-    });
-
+    presenceChannel = supabase.channel('online-users', { config: { presence: { key: currentUserId } } });
     presenceChannel
         .on('presence', { event: 'sync' }, () => {
             const state = presenceChannel.presenceState();
             onlineUsers = new Set(Object.keys(state));
             updatePresenceUI();
         })
-        .on('presence', { event: 'join' }, ({ key }) => {
-            onlineUsers.add(key);
-            updatePresenceUI();
-        })
-        .on('presence', { event: 'leave' }, ({ key }) => {
-            onlineUsers.delete(key);
-            updatePresenceUI();
-        })
+        .on('presence', { event: 'join' }, ({ key }) => { onlineUsers.add(key); updatePresenceUI(); })
+        .on('presence', { event: 'leave' }, ({ key }) => { onlineUsers.delete(key); updatePresenceUI(); })
         .subscribe(async (status) => {
             if (status === 'SUBSCRIBED') {
                 await presenceChannel.track({ user_id: currentUserId, online_at: new Date().toISOString() });
@@ -421,17 +404,10 @@ function subscribeToPresence() {
 async function fetchUnreadByUser() {
     if (!currentUserId) return;
     try {
-        const { data, error } = await supabase
-            .from('messages')
-            .select('id_sent')
-            .eq('id_received', currentUserId)
-            .is('read_at', null);
+        const { data, error } = await supabase.from('messages').select('id_sent').eq('id_received', currentUserId).is('read_at', null);
         if (error) return;
         const map = new Map();
-        data.forEach(msg => {
-            if (msg.id_sent !== userSelect.value)
-                map.set(msg.id_sent, (map.get(msg.id_sent) || 0) + 1);
-        });
+        data.forEach(msg => { if (msg.id_sent !== userSelect.value) map.set(msg.id_sent, (map.get(msg.id_sent) || 0) + 1); });
         usersWithUnread = map;
     } catch {}
 }
@@ -451,14 +427,11 @@ function updatePresenceUI() {
             const pill = document.createElement('span');
             pill.className = 'status-pill';
             if (usersWithUnread.has(selId)) {
-                pill.textContent = usersWithUnread.get(selId);
-                pill.dataset.status = 'unread';
+                pill.textContent = usersWithUnread.get(selId); pill.dataset.status = 'unread';
                 pill.title = `${usersWithUnread.get(selId)} message(s) non lu(s)`;
                 wrapper.appendChild(pill);
             } else if (onlineUsers.has(selId)) {
-                pill.dataset.status = 'online';
-                pill.title = 'En ligne';
-                wrapper.appendChild(pill);
+                pill.dataset.status = 'online'; pill.title = 'En ligne'; wrapper.appendChild(pill);
             }
         }
     }
@@ -471,36 +444,25 @@ function updatePresenceUI() {
         badge.title = `${total} message(s) non lu(s)`;
         userSelect.insertAdjacentElement('beforebegin', badge);
     }
-    // NOUVEAU : bouton téléphone visible seulement si le peer est en ligne
     updateCallButtonState();
 }
 
 function clearPresenceUI() {
-    Array.from(userSelect.options).forEach(opt => {
-        if (opt.value && users[opt.value]) opt.textContent = users[opt.value].username;
-    });
+    Array.from(userSelect.options).forEach(opt => { if (opt.value && users[opt.value]) opt.textContent = users[opt.value].username; });
     document.querySelectorAll('.status-pill, .unread-total-badge').forEach(el => el.remove());
-    onlineUsers = new Set();
-    usersWithUnread = new Map();
+    onlineUsers = new Set(); usersWithUnread = new Map();
 }
 
 // ============================================================
 // MESSAGES — Chargement initial
 // ============================================================
 async function loadInitialMessages() {
-    if (!currentUserId || !userSelect.value) {
-        chatMessages.innerHTML = '';
-        currentMessages = [];
-        return;
-    }
-    const uid  = currentUserId;
-    const peer = userSelect.value;
-    const { data, error } = await supabase
-        .from('messages')
+    if (!currentUserId || !userSelect.value) { chatMessages.innerHTML = ''; currentMessages = []; return; }
+    const uid  = currentUserId, peer = userSelect.value;
+    const { data, error } = await supabase.from('messages')
         .select('id, id_sent, id_received, content, created_at, read_at, city')
         .or(`and(id_sent.eq.${uid},id_received.eq.${peer}),and(id_sent.eq.${peer},id_received.eq.${uid})`)
         .order('created_at', { ascending: true });
-
     if (error) { console.error('loadInitialMessages:', error); return; }
     currentMessages = data;
     renderMessages(data);
@@ -517,20 +479,13 @@ async function loadInitialMessages() {
 function subscribeToConversation() {
     if (msgChannel) { supabase.removeChannel(msgChannel); msgChannel = null; }
     if (!currentUserId || !userSelect.value) return;
-    const uid  = currentUserId;
-    const peer = userSelect.value;
-
-    msgChannel = supabase
-        .channel(`conv-${uid}-${peer}`)
+    const uid = currentUserId, peer = userSelect.value;
+    msgChannel = supabase.channel(`conv-${uid}-${peer}`)
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
             const msg = payload.new;
-            const isOurConv = (msg.id_sent === uid && msg.id_received === peer)
-                           || (msg.id_sent === peer && msg.id_received === uid);
+            const isOurConv = (msg.id_sent === uid && msg.id_received === peer) || (msg.id_sent === peer && msg.id_received === uid);
             if (!isOurConv) {
-                if (msg.id_received === uid) {
-                    usersWithUnread.set(msg.id_sent, (usersWithUnread.get(msg.id_sent) || 0) + 1);
-                    updatePresenceUI();
-                }
+                if (msg.id_received === uid) { usersWithUnread.set(msg.id_sent, (usersWithUnread.get(msg.id_sent) || 0) + 1); updatePresenceUI(); }
                 return;
             }
             if (currentMessages.find(m => m.id === msg.id)) return;
@@ -540,29 +495,20 @@ function subscribeToConversation() {
             if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
             if (document.hidden && msg.id_sent === peer) {
                 const voiceData = parseVoiceMessage(msg.content);
-                const preview = voiceData ? '🎙️ Message vocal' : msg.content.substring(0, 60);
+                const fileData = parseFileMessage(msg.content);
+                const preview = voiceData ? '🎙️ Message vocal' : fileData ? `📎 ${fileData.name}` : msg.content.substring(0, 60);
                 showNotification(`Nouveau message de ${users[msg.id_sent]?.username || '?'}`, preview);
             }
-            if (msg.id_received === uid) {
-                await markMessagesAsRead();
-                await fetchUnreadByUser();
-                updatePresenceUI();
-            }
+            if (msg.id_received === uid) { await markMessagesAsRead(); await fetchUnreadByUser(); updatePresenceUI(); }
         })
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
             const updated = payload.new;
-            const isOurConv = (updated.id_sent === uid && updated.id_received === peer)
-                           || (updated.id_sent === peer && updated.id_received === uid);
+            const isOurConv = (updated.id_sent === uid && updated.id_received === peer) || (updated.id_sent === peer && updated.id_received === uid);
             if (!isOurConv) return;
             const idx = currentMessages.findIndex(m => m.id === updated.id);
-            if (idx !== -1) {
-                currentMessages[idx] = { ...currentMessages[idx], ...updated };
-                updateMessageReadStatus(updated.id, updated.read_at);
-            }
+            if (idx !== -1) { currentMessages[idx] = { ...currentMessages[idx], ...updated }; updateMessageReadStatus(updated.id, updated.read_at); }
         })
-        .subscribe((status, err) => {
-            if (err) console.error('subscribeToConversation error:', err);
-        });
+        .subscribe((status, err) => { if (err) console.error('subscribeToConversation error:', err); });
 }
 
 function updateMessageReadStatus(msgId, readAt) {
@@ -575,15 +521,8 @@ function updateMessageReadStatus(msgId, readAt) {
     const dateObj = new Date(msg.created_at);
     const msgTime = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
     let metaText = msg.city ? `📍 ${msg.city} · ${msgTime}` : msgTime;
-    if (readAt) {
-        metaText += ' · 👁️ Lu';
-        metaEl.classList.remove('sent-status');
-        metaEl.classList.add('read');
-    } else {
-        metaText += ' · ✓ Envoyé';
-        metaEl.classList.remove('read');
-        metaEl.classList.add('sent-status');
-    }
+    if (readAt) { metaText += ' · 👁️ Lu'; metaEl.classList.remove('sent-status'); metaEl.classList.add('read'); }
+    else { metaText += ' · ✓ Envoyé'; metaEl.classList.remove('read'); metaEl.classList.add('sent-status'); }
     metaEl.textContent = metaText;
 }
 
@@ -594,17 +533,14 @@ function subscribeToTyping() {
     if (typingChannel) { supabase.removeChannel(typingChannel); typingChannel = null; }
     if (!currentUserId || !userSelect.value) return;
     const channelName = `typing:${[currentUserId, userSelect.value].sort().join(':')}`;
-    typingChannel = supabase
-        .channel(channelName)
+    typingChannel = supabase.channel(channelName)
         .on('broadcast', { event: 'typing' }, ({ payload }) => {
             if (payload.user_id === currentUserId) return;
             if (payload.is_typing) {
                 const name = users[payload.user_id]?.username || 'L\'utilisateur';
                 typingIndicator.innerHTML = `<span>${name} est en train d'écrire</span><span class="typing-dots"><span></span><span></span><span></span></span>`;
                 typingIndicator.style.display = 'flex';
-            } else {
-                typingIndicator.style.display = 'none';
-            }
+            } else { typingIndicator.style.display = 'none'; }
         })
         .subscribe();
 }
@@ -612,26 +548,15 @@ function subscribeToTyping() {
 async function broadcastTyping(isTypingNow) {
     if (!typingChannel || !currentUserId) return;
     try {
-        await typingChannel.send({
-            type: 'broadcast',
-            event: 'typing',
-            payload: { user_id: currentUserId, is_typing: isTypingNow }
-        });
+        await typingChannel.send({ type: 'broadcast', event: 'typing', payload: { user_id: currentUserId, is_typing: isTypingNow } });
     } catch {}
 }
 
 messageInput.addEventListener('input', e => {
     handleFontInput(e);
-    if (!isTyping) {
-        isTyping = true;
-        broadcastTyping(true);
-    }
+    if (!isTyping) { isTyping = true; broadcastTyping(true); }
     clearTimeout(typingTimeout);
-    typingTimeout = setTimeout(() => {
-        isTyping = false;
-        broadcastTyping(false);
-        typingIndicator.style.display = 'none';
-    }, 2000);
+    typingTimeout = setTimeout(() => { isTyping = false; broadcastTyping(false); typingIndicator.style.display = 'none'; }, 2000);
 });
 
 // ============================================================
@@ -640,11 +565,8 @@ messageInput.addEventListener('input', e => {
 function subscribeToIncomingCalls() {
     if (incomingCallChannel) { supabase.removeChannel(incomingCallChannel); incomingCallChannel = null; }
     if (!currentUserId) return;
-    incomingCallChannel = supabase
-        .channel(`calls:${currentUserId}`)
-        .on('broadcast', { event: 'call_signal' }, ({ payload }) => {
-            handleCallSignal(payload);
-        })
+    incomingCallChannel = supabase.channel(`calls:${currentUserId}`)
+        .on('broadcast', { event: 'call_signal' }, ({ payload }) => { handleCallSignal(payload); })
         .subscribe();
 }
 
@@ -657,22 +579,11 @@ async function sendCallSignal(calleeId, payload) {
 
 function handleCallSignal(payload) {
     if (payload.type === 'incoming' && callState === 'idle') {
-        callState         = 'ringing';
-        currentCallId     = payload.callId;
-        callPeerUserId    = payload.callerId;
-        _pendingCallOffer = payload.offer;
-        showCallScreen('ringing');
-        return;
+        callState = 'ringing'; currentCallId = payload.callId; callPeerUserId = payload.callerId;
+        _pendingCallOffer = payload.offer; showCallScreen('ringing'); return;
     }
-    if (payload.type === 'rejected' && callState === 'calling') {
-        endCall(false);
-        showCallEndedBrief('Appel refusé');
-        return;
-    }
-    if (payload.type === 'ended') {
-        if (callState !== 'idle') endCall(false);
-        return;
-    }
+    if (payload.type === 'rejected' && callState === 'calling') { endCall(false); showCallEndedBrief('Appel refusé'); return; }
+    if (payload.type === 'ended') { if (callState !== 'idle') endCall(false); return; }
     if (payload.type === 'answer' && peerConnection) {
         peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer))
             .then(() => { callState = 'active'; showCallScreen('active'); })
@@ -680,25 +591,22 @@ function handleCallSignal(payload) {
         return;
     }
     if (payload.type === 'ice_candidate' && peerConnection) {
-        peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {});
+        peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {}); return;
+    }
+    if (payload.type === 'renegotiate' && peerConnection && callState === 'active') {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(payload.offer))
+            .then(() => peerConnection.createAnswer())
+            .then(answer => peerConnection.setLocalDescription(answer).then(() => answer))
+            .then(answer => sendCallSignal(callPeerUserId, { type: 'renegotiate_answer', answer: { type: answer.type, sdp: answer.sdp }, callId: currentCallId, callerId: currentUserId }))
+            .catch(e => console.error('[Video] renegotiate:', e));
         return;
     }
-    // Signaux vidéo
-    if (payload.type === 'video_enabled' && callState === 'active') {
-        remoteVideoEnabled = true;
-        showRemoteVideo();
-        return;
+    if (payload.type === 'renegotiate_answer' && peerConnection) {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer)).catch(e => console.error('[Video] renegotiate_answer:', e)); return;
     }
-    if (payload.type === 'video_disabled' && callState === 'active') {
-        remoteVideoEnabled = false;
-        hideRemoteVideo();
-        return;
-    }
-    // Réactions
-    if (payload.type === 'reaction' && callState === 'active') {
-        showReactionBubble(payload.emoji, 'remote');
-        return;
-    }
+    if (payload.type === 'video_enabled' && callState === 'active') { remoteVideoEnabled = true; updateVideoLayout(); return; }
+    if (payload.type === 'video_disabled' && callState === 'active') { remoteVideoEnabled = false; updateVideoLayout(); return; }
+    if (payload.type === 'reaction' && callState === 'active') { showReactionBubble(payload.emoji, 'remote'); return; }
 }
 
 // ============================================================
@@ -710,11 +618,7 @@ async function getGeolocationCached() {
     _geoPend = new Promise((resolve, reject) => {
         if (!navigator.geolocation) { reject(new Error('Non supporté')); return; }
         navigator.geolocation.getCurrentPosition(
-            p => {
-                _geoCache = { latitude: p.coords.latitude, longitude: p.coords.longitude };
-                _geoPend  = null;
-                resolve(_geoCache);
-            },
+            p => { _geoCache = { latitude: p.coords.latitude, longitude: p.coords.longitude }; _geoPend = null; resolve(_geoCache); },
             err => { _geoPend = null; reject(err); },
             { timeout: 3000, maximumAge: 300000 }
         );
@@ -758,8 +662,7 @@ async function getUsers() {
     data.forEach(user => {
         users[user.id] = user;
         const opt = document.createElement('option');
-        opt.value = user.id;
-        opt.textContent = user.username;
+        opt.value = user.id; opt.textContent = user.username;
         userSelect.appendChild(opt);
     });
     if (currentUserId) updatePresenceUI();
@@ -771,12 +674,8 @@ async function getUsers() {
 async function markMessagesAsRead() {
     if (!currentUserId || !userSelect.value) return;
     try {
-        await supabase
-            .from('messages')
-            .update({ read_at: new Date().toISOString() })
-            .eq('id_sent', userSelect.value)
-            .eq('id_received', currentUserId)
-            .is('read_at', null);
+        await supabase.from('messages').update({ read_at: new Date().toISOString() })
+            .eq('id_sent', userSelect.value).eq('id_received', currentUserId).is('read_at', null);
     } catch (e) { console.error('markMessagesAsRead:', e); }
 }
 
@@ -786,14 +685,14 @@ async function markMessagesAsRead() {
 function generateQuickReplies(lastMessage) {
     if (!lastMessage || lastMessage.id_sent === currentUserId) { quickReplies.style.display = 'none'; return; }
     const content = lastMessage.content.toLowerCase().trim();
-    if (content.startsWith('{"type":"__voice__"') || content.length < 3) { quickReplies.style.display = 'none'; return; }
+    if (content.startsWith('{"type":"__voice__"') || content.startsWith('{"type":"__file__"') || content.length < 3) { quickReplies.style.display = 'none'; return; }
     const patterns = {
         greeting:     { kw: ['bonjour','salut','hello','coucou','bonsoir'],        r: ['👋 Bonjour !','Salut !','Hello !','Ça va ?'] },
         thanks:       { kw: ['merci','thanks','thx'],                              r: ['De rien !','Avec plaisir !','😊','Pas de souci !'] },
         howareyou:    { kw: ['comment vas','ça va','tu vas'],                      r: ['Très bien merci !','Ça va et toi ?','Super !'] },
         agreement:    { kw: ['ok','oui','yes',"d'accord"],                         r: ['Parfait !','👍','Super !','Génial !'] },
         disagreement: { kw: ['non','no',"pas d'accord"],                           r: ["D'accord",'Pas de souci','Compris'] },
-        apology:      { kw: ['désolé','sorry','pardon'],                           r: ['Pas grave !',"T'inquiète pas",'Aucun souci'] },
+        apology:      { kw: ['désolé','sorry','pardon'],                           r: ['Pas grave !',"T\'inquiète pas",'Aucun souci'] },
         laugh:        { kw: ['haha','lol','mdr'],                                  r: ['😂','Haha oui','Trop marrant'] },
         planning:     { kw: ['demain','ce soir','weekend','plan','rendez-vous'],   r: ['Avec plaisir','Super idée','Je suis partant'] },
         tired:        { kw: ['occupé','fatigue','dormir','pas le temps'],          r: ['Pas grave','À plus tard','Dors bien !'] },
@@ -817,14 +716,10 @@ function generateQuickReplies(lastMessage) {
     quickReplies.innerHTML = '';
     selected.forEach(reply => {
         const btn = document.createElement('button');
-        btn.className = 'quick-reply-btn';
-        btn.textContent = reply;
+        btn.className = 'quick-reply-btn'; btn.textContent = reply;
         btn.addEventListener('click', () => {
-            messageInput.value = reply;
-            rawInputText = reply;
-            prevConvertedValue = reply;
-            handleSend();
-            quickReplies.style.display = 'none';
+            messageInput.value = reply; rawInputText = reply; prevConvertedValue = reply;
+            handleSend(); quickReplies.style.display = 'none';
         });
         quickReplies.appendChild(btn);
     });
@@ -838,11 +733,10 @@ function initEmojiPicker() {
     const picker = document.querySelector('emoji-picker');
     if (!picker) return;
     picker.addEventListener('emoji-click', e => {
-        const pos    = messageInput.selectionStart ?? messageInput.value.length;
+        const pos = messageInput.selectionStart ?? messageInput.value.length;
         const rawPos = Math.min(pos, rawInputText.length);
         rawInputText = rawInputText.slice(0, rawPos) + e.detail.unicode + rawInputText.slice(rawPos);
-        applyFontToInput();
-        prevConvertedValue = messageInput.value;
+        applyFontToInput(); prevConvertedValue = messageInput.value;
         const newPos = pos + e.detail.unicode.length;
         try { messageInput.setSelectionRange(newPos, newPos); } catch {}
         messageInput.focus();
@@ -856,14 +750,12 @@ function openEmojiPicker() {
         emojiPickerOverlay.addEventListener('click', closeEmojiPicker);
         document.body.appendChild(emojiPickerOverlay);
     }
-    emojiPickerWrapper.style.display = 'block';
-    emojiPickerWrapper.classList.remove('hiding');
+    emojiPickerWrapper.style.display = 'block'; emojiPickerWrapper.classList.remove('hiding');
     emojiButton.classList.add('active');
 }
 
 function closeEmojiPicker() {
-    emojiPickerWrapper.classList.add('hiding');
-    emojiButton.classList.remove('active');
+    emojiPickerWrapper.classList.add('hiding'); emojiButton.classList.remove('active');
     setTimeout(() => { emojiPickerWrapper.style.display = 'none'; emojiPickerWrapper.classList.remove('hiding'); }, 200);
     if (emojiPickerOverlay?.parentNode) { emojiPickerOverlay.parentNode.removeChild(emojiPickerOverlay); emojiPickerOverlay = null; }
 }
@@ -876,6 +768,202 @@ document.addEventListener('click', e => {
     if (!emojiPickerWrapper.contains(e.target) && e.target !== emojiButton)
         if (emojiPickerWrapper.style.display !== 'none') closeEmojiPicker();
 });
+
+// ============================================================
+// PARTAGE DE FICHIERS — Supabase Storage
+// ============================================================
+
+/**
+ * Parse un message de type fichier
+ * Format : {"type":"__file__","url":"...","name":"...","mime":"...","size":123}
+ */
+function parseFileMessage(content) {
+    if (!content || !content.startsWith('{')) return null;
+    try { const obj = JSON.parse(content); if (obj.type === '__file__') return obj; } catch {}
+    return null;
+}
+
+/**
+ * Détermine si un fichier est une image
+ */
+function isImageMime(mime) {
+    return mime && mime.startsWith('image/');
+}
+
+/**
+ * Détermine si un fichier est une vidéo
+ */
+function isVideoMime(mime) {
+    return mime && mime.startsWith('video/');
+}
+
+/**
+ * Upload un fichier vers Supabase Storage et envoie le message
+ */
+async function handleFileUpload(file) {
+    if (!currentUserId || !userSelect.value) { alert('Connectez-vous pour envoyer des fichiers.'); return; }
+    if (file.size > MAX_FILE_SIZE) { alert(`Fichier trop volumineux. Maximum : ${MAX_FILE_SIZE / 1024 / 1024} MB`); return; }
+
+    const allowedMimes = ['image/jpeg','image/png','image/gif','image/webp','image/heic','image/heif','video/mp4','video/webm','video/quicktime','video/3gpp'];
+    if (!allowedMimes.includes(file.type)) {
+        alert('Format non supporté. Formats acceptés : JPG, PNG, GIF, WEBP, HEIC, MP4, WEBM, MOV, 3GP');
+        return;
+    }
+
+    const progressEl = document.getElementById('upload-progress');
+    if (progressEl) { progressEl.style.display = 'block'; progressEl.textContent = '📤 Envoi en cours…'; }
+
+    try {
+        // Nom unique pour éviter les collisions
+        const ext = file.name.split('.').pop();
+        const uniqueName = `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const filePath = `${currentUserId}/${uniqueName}`;
+
+        const { data: uploadData, error: uploadError } = await supabase.storage
+            .from(FILE_BUCKET)
+            .upload(filePath, file, { contentType: file.type, upsert: false });
+
+        if (uploadError) throw uploadError;
+
+        // Obtenir l'URL publique
+        const { data: urlData } = supabase.storage.from(FILE_BUCKET).getPublicUrl(filePath);
+        const publicUrl = urlData.publicUrl;
+
+        const filePayload = JSON.stringify({
+            type: '__file__',
+            url: publicUrl,
+            name: file.name,
+            mime: file.type,
+            size: file.size,
+            path: filePath
+        });
+
+        await sendMessage(currentUserId, filePayload);
+
+        if (progressEl) { progressEl.textContent = '✅ Fichier envoyé !'; setTimeout(() => { progressEl.style.display = 'none'; }, 2000); }
+    } catch (err) {
+        console.error('handleFileUpload:', err);
+        if (progressEl) { progressEl.textContent = '❌ Erreur lors de l\'envoi'; setTimeout(() => { progressEl.style.display = 'none'; }, 3000); }
+        alert('Erreur lors de l\'envoi du fichier : ' + (err.message || err));
+    }
+}
+
+/**
+ * Crée l'élément HTML d'aperçu d'un fichier dans le chat
+ */
+function createFileMessageElement(fileData, isSent) {
+    const wrap = document.createElement('div');
+    wrap.className = 'file-message-wrap';
+
+    if (isImageMime(fileData.mime)) {
+        const img = document.createElement('img');
+        img.src = fileData.url;
+        img.alt = fileData.name;
+        img.className = 'file-msg-image';
+        img.loading = 'lazy';
+        img.addEventListener('click', () => openMediaViewer(fileData.url, 'image', fileData.name));
+        wrap.appendChild(img);
+    } else if (isVideoMime(fileData.mime)) {
+        const video = document.createElement('video');
+        video.src = fileData.url;
+        video.controls = true;
+        video.className = 'file-msg-video';
+        video.preload = 'metadata';
+        wrap.appendChild(video);
+    } else {
+        // Fichier générique
+        const fileDiv = document.createElement('div');
+        fileDiv.className = 'file-msg-generic';
+        fileDiv.innerHTML = `<span class="file-msg-icon">📎</span><span class="file-msg-name">${fileData.name}</span>`;
+        const sizeKB = (fileData.size / 1024).toFixed(1);
+        const sizeText = document.createElement('span');
+        sizeText.className = 'file-msg-size';
+        sizeText.textContent = sizeKB < 1024 ? `${sizeKB} Ko` : `${(fileData.size / 1024 / 1024).toFixed(1)} Mo`;
+        fileDiv.appendChild(sizeText);
+        const dlLink = document.createElement('a');
+        dlLink.href = fileData.url; dlLink.download = fileData.name;
+        dlLink.className = 'file-msg-dl'; dlLink.textContent = '⬇ Télécharger';
+        dlLink.target = '_blank';
+        fileDiv.appendChild(dlLink);
+        wrap.appendChild(fileDiv);
+    }
+
+    // Bouton télécharger pour images et vidéos aussi
+    if (isImageMime(fileData.mime) || isVideoMime(fileData.mime)) {
+        const dlBtn = document.createElement('a');
+        dlBtn.href = fileData.url; dlBtn.download = fileData.name;
+        dlBtn.className = 'file-msg-dl-btn'; dlBtn.textContent = '⬇';
+        dlBtn.title = 'Télécharger'; dlBtn.target = '_blank';
+        wrap.appendChild(dlBtn);
+    }
+
+    return wrap;
+}
+
+/**
+ * Visionneuse plein écran pour les images
+ */
+function openMediaViewer(url, type, name) {
+    const viewer = document.createElement('div');
+    viewer.className = 'media-viewer-overlay';
+    viewer.innerHTML = `
+        <div class="media-viewer-content">
+            <button class="media-viewer-close">✕</button>
+            <a class="media-viewer-dl" href="${url}" download="${name}" target="_blank">⬇ Télécharger</a>
+            <img src="${url}" alt="${name}" class="media-viewer-img">
+        </div>`;
+    viewer.querySelector('.media-viewer-close').addEventListener('click', () => viewer.remove());
+    viewer.addEventListener('click', e => { if (e.target === viewer) viewer.remove(); });
+    document.body.appendChild(viewer);
+}
+
+/**
+ * Injection du bouton 📎 (galerie) et 📷 (caméra) dans la barre d'input
+ */
+function injectFileUploadUI() {
+    const chatInput = document.querySelector('.chat-input');
+    const sendBtn   = document.getElementById('send-button');
+    if (!chatInput || !sendBtn) return;
+
+    // Input fichier galerie (photos + vidéos)
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file'; fileInput.id = 'file-input'; fileInput.style.display = 'none';
+    fileInput.accept = 'image/*,video/*';
+    fileInput.addEventListener('change', e => {
+        const file = e.target.files?.[0];
+        if (file) handleFileUpload(file);
+        fileInput.value = '';
+    });
+    document.body.appendChild(fileInput);
+
+    // Input caméra directe (mobile)
+    const cameraInput = document.createElement('input');
+    cameraInput.type = 'file'; cameraInput.id = 'camera-input'; cameraInput.style.display = 'none';
+    cameraInput.accept = 'image/*,video/*';
+    cameraInput.capture = 'environment'; // ouvre la caméra arrière par défaut sur mobile
+    cameraInput.addEventListener('change', e => {
+        const file = e.target.files?.[0];
+        if (file) handleFileUpload(file);
+        cameraInput.value = '';
+    });
+    document.body.appendChild(cameraInput);
+
+    // Bouton galerie / fichier
+    const attachBtn = document.createElement('button');
+    attachBtn.id = 'attach-button'; attachBtn.className = 'icon-button';
+    attachBtn.title = 'Envoyer une photo ou vidéo'; attachBtn.innerHTML = '📎';
+    attachBtn.addEventListener('click', () => fileInput.click());
+
+    // Bouton caméra directe
+    const cameraBtn = document.createElement('button');
+    cameraBtn.id = 'camera-button'; cameraBtn.className = 'icon-button';
+    cameraBtn.title = 'Prendre une photo / vidéo'; cameraBtn.innerHTML = '📷';
+    cameraBtn.addEventListener('click', () => cameraInput.click());
+
+    // Insérer avant le bouton Envoyer
+    chatInput.insertBefore(attachBtn, sendBtn);
+    chatInput.insertBefore(cameraBtn, sendBtn);
+}
 
 // ============================================================
 // MESSAGES — Rendu
@@ -900,86 +988,46 @@ function generateStaticWaveform(duration, width) {
 }
 
 function drawStaticWaveform(canvas, data, progress, isSent) {
-    canvas.width  = canvas.offsetWidth  || 160;
-    canvas.height = canvas.offsetHeight || 32;
+    canvas.width = canvas.offsetWidth || 160; canvas.height = canvas.offsetHeight || 32;
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height, bars = data.length, barW = W / bars;
     ctx.clearRect(0, 0, W, H);
     data.forEach((val, i) => {
-        const barH  = Math.max(3, val * H * 0.85);
-        const y     = (H - barH) / 2;
+        const barH = Math.max(3, val * H * 0.85), y = (H - barH) / 2;
         const played = i / bars < progress;
-        ctx.fillStyle = played
-            ? (isSent ? 'rgba(0,0,0,0.55)' : '#6ee7b7')
-            : (isSent ? 'rgba(0,0,0,0.22)' : 'rgba(110,231,183,0.32)');
-        ctx.beginPath();
-        ctx.roundRect(i * barW + barW * 0.15, y, barW * 0.7, barH, 2);
-        ctx.fill();
+        ctx.fillStyle = played ? (isSent ? 'rgba(0,0,0,0.55)' : '#6ee7b7') : (isSent ? 'rgba(0,0,0,0.22)' : 'rgba(110,231,183,0.32)');
+        ctx.beginPath(); ctx.roundRect(i * barW + barW * 0.15, y, barW * 0.7, barH, 2); ctx.fill();
     });
 }
 
 function createVoiceMessagePlayer(voiceData, isSent) {
-    const wrap = document.createElement('div');
-    wrap.className = 'voice-message-player';
-    const playBtn = document.createElement('button');
-    playBtn.className = 'vmp-play-btn';
-    playBtn.textContent = '▶';
-    const waveWrap = document.createElement('div');
-    waveWrap.className = 'vmp-waveform-container';
-    const canvas = document.createElement('canvas');
-    waveWrap.appendChild(canvas);
-    const info = document.createElement('div');
-    info.className = 'vmp-info';
-    const durSpan = document.createElement('span');
-    durSpan.className = 'vmp-duration';
-    durSpan.textContent = formatVoiceDuration(voiceData.duration || 0);
-    const speedBtn = document.createElement('button');
-    speedBtn.className = 'vmp-speed-btn';
-    speedBtn.textContent = '1x';
+    const wrap = document.createElement('div'); wrap.className = 'voice-message-player';
+    const playBtn = document.createElement('button'); playBtn.className = 'vmp-play-btn'; playBtn.textContent = '▶';
+    const waveWrap = document.createElement('div'); waveWrap.className = 'vmp-waveform-container';
+    const canvas = document.createElement('canvas'); waveWrap.appendChild(canvas);
+    const info = document.createElement('div'); info.className = 'vmp-info';
+    const durSpan = document.createElement('span'); durSpan.className = 'vmp-duration'; durSpan.textContent = formatVoiceDuration(voiceData.duration || 0);
+    const speedBtn = document.createElement('button'); speedBtn.className = 'vmp-speed-btn'; speedBtn.textContent = '1x';
     if (voiceData.effect && voiceData.effect !== 'normal') {
-        const effectBadge = document.createElement('span');
-        effectBadge.className = 'vmp-effect-badge';
-        effectBadge.textContent = VOICE_EFFECTS[voiceData.effect]?.label || voiceData.effect;
-        info.appendChild(effectBadge);
+        const effectBadge = document.createElement('span'); effectBadge.className = 'vmp-effect-badge';
+        effectBadge.textContent = VOICE_EFFECTS[voiceData.effect]?.label || voiceData.effect; info.appendChild(effectBadge);
     }
-    info.appendChild(durSpan);
-    info.appendChild(speedBtn);
-    wrap.appendChild(playBtn);
-    wrap.appendChild(waveWrap);
-    wrap.appendChild(info);
+    info.appendChild(durSpan); info.appendChild(speedBtn);
+    wrap.appendChild(playBtn); wrap.appendChild(waveWrap); wrap.appendChild(info);
     const audio = new Audio(voiceData.data || voiceData.url);
     let playbackRate = 1, isPlaying = false, animId = null;
     const waveData = generateStaticWaveform(voiceData.duration || 10, 160);
     setTimeout(() => drawStaticWaveform(canvas, waveData, 0, isSent), 60);
     speedBtn.addEventListener('click', () => {
-        const speeds = [1, 1.5, 2];
-        playbackRate = speeds[(speeds.indexOf(playbackRate) + 1) % speeds.length];
-        audio.playbackRate = playbackRate;
-        speedBtn.textContent = `${playbackRate}x`;
+        const speeds = [1, 1.5, 2]; playbackRate = speeds[(speeds.indexOf(playbackRate) + 1) % speeds.length];
+        audio.playbackRate = playbackRate; speedBtn.textContent = `${playbackRate}x`;
     });
     playBtn.addEventListener('click', async () => {
-        if (isPlaying) {
-            audio.pause(); isPlaying = false; playBtn.textContent = '▶';
-            cancelAnimationFrame(animId);
-            drawStaticWaveform(canvas, waveData, audio.currentTime / (voiceData.duration || 1), isSent);
-        } else {
-            audio.playbackRate = playbackRate;
-            await audio.play().catch(e => console.warn('[Voice] play:', e));
-            isPlaying = true; playBtn.textContent = '⏸';
-            animatePlay();
-        }
+        if (isPlaying) { audio.pause(); isPlaying = false; playBtn.textContent = '▶'; cancelAnimationFrame(animId); drawStaticWaveform(canvas, waveData, audio.currentTime / (voiceData.duration || 1), isSent); }
+        else { audio.playbackRate = playbackRate; await audio.play().catch(e => console.warn('[Voice] play:', e)); isPlaying = true; playBtn.textContent = '⏸'; animatePlay(); }
     });
-    audio.addEventListener('ended', () => {
-        isPlaying = false; playBtn.textContent = '▶';
-        cancelAnimationFrame(animId);
-        drawStaticWaveform(canvas, waveData, 0, isSent);
-        durSpan.textContent = formatVoiceDuration(voiceData.duration || 0);
-    });
-    waveWrap.addEventListener('click', e => {
-        const pct = (e.clientX - waveWrap.getBoundingClientRect().left) / waveWrap.offsetWidth;
-        audio.currentTime = pct * (voiceData.duration || audio.duration || 0);
-        drawStaticWaveform(canvas, waveData, pct, isSent);
-    });
+    audio.addEventListener('ended', () => { isPlaying = false; playBtn.textContent = '▶'; cancelAnimationFrame(animId); drawStaticWaveform(canvas, waveData, 0, isSent); durSpan.textContent = formatVoiceDuration(voiceData.duration || 0); });
+    waveWrap.addEventListener('click', e => { const pct = (e.clientX - waveWrap.getBoundingClientRect().left) / waveWrap.offsetWidth; audio.currentTime = pct * (voiceData.duration || audio.duration || 0); drawStaticWaveform(canvas, waveData, pct, isSent); });
     function animatePlay() {
         animId = requestAnimationFrame(animatePlay);
         const dur = voiceData.duration || audio.duration || 1;
@@ -998,11 +1046,11 @@ function renderMessages(data) {
 }
 
 function appendMessageElement(message) {
-const last = currentMessages[currentMessages.length - 2];
-const lastDate = last ? new Date(last.created_at).toLocaleDateString('fr-FR') : null;
-const fragment = document.createDocumentFragment();
-appendToFragment(fragment, message, lastDate, () => {});
-chatMessages.appendChild(fragment);
+    const last = currentMessages[currentMessages.length - 2];
+    const lastDate = last ? new Date(last.created_at).toLocaleDateString('fr-FR') : null;
+    const fragment = document.createDocumentFragment();
+    appendToFragment(fragment, message, lastDate, () => {});
+    chatMessages.appendChild(fragment);
 }
 
 function appendToFragment(fragment, message, lastDate, setLastDate) {
@@ -1012,26 +1060,23 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     const isMine   = message.id_sent === currentUserId;
     const sender   = users[message.id_sent]?.username || 'Inconnu';
     const voiceData = parseVoiceMessage(message.content);
+    const fileData  = parseFileMessage(message.content);
 
     if (msgDate !== lastDate) {
-        const el = document.createElement('div');
-        el.className = 'date';
-        el.textContent = msgDate;
-        fragment.appendChild(el);
-        setLastDate(msgDate);
+        const el = document.createElement('div'); el.className = 'date'; el.textContent = msgDate;
+        fragment.appendChild(el); setLastDate(msgDate);
     }
 
     const msgEl = document.createElement('div');
     msgEl.classList.add('message', isMine ? 'sent' : 'received');
     if (voiceData) msgEl.classList.add('voice-msg');
+    if (fileData)  msgEl.classList.add('file-msg');
     msgEl.dataset.msgId = message.id;
 
     const senderSpan = document.createElement('span');
-    senderSpan.className = 'msg-sender';
-    senderSpan.textContent = sender;
+    senderSpan.className = 'msg-sender'; senderSpan.textContent = sender;
 
-    const metaSpan = document.createElement('span');
-    metaSpan.className = 'msg-meta';
+    const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta';
     let metaText = message.city ? `📍 ${message.city} · ${msgTime}` : msgTime;
     if (isMine) {
         if (message.read_at) { metaText += ' · 👁️ Lu'; metaSpan.classList.add('read'); }
@@ -1040,18 +1085,14 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     metaSpan.textContent = metaText;
 
     msgEl.appendChild(senderSpan);
-    if (voiceData) {
-        msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine));
-    } else {
-        msgEl.appendChild(document.createTextNode(message.content));
-    }
+    if (voiceData)    { msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine)); }
+    else if (fileData){ msgEl.appendChild(createFileMessageElement(fileData, isMine)); }
+    else              { msgEl.appendChild(document.createTextNode(message.content)); }
     msgEl.appendChild(metaSpan);
 
     if (isMine) {
-        const del = document.createElement('span');
-        del.textContent = '✖';
-        del.className = 'delete-button';
-        del.addEventListener('click', () => deleteMessage(message.id));
+        const del = document.createElement('span'); del.textContent = '✖'; del.className = 'delete-button';
+        del.addEventListener('click', () => deleteMessage(message.id, fileData?.path));
         msgEl.appendChild(del);
     }
     fragment.appendChild(msgEl);
@@ -1063,24 +1104,20 @@ function appendOptimisticMessage(content) {
     const msgDate = now.toLocaleDateString('fr-FR');
     const lastDateEl = chatMessages.querySelector('.date:last-of-type');
     if (!lastDateEl || lastDateEl.textContent !== msgDate) {
-        const dateEl = document.createElement('div');
-        dateEl.className = 'date';
-        dateEl.textContent = msgDate;
+        const dateEl = document.createElement('div'); dateEl.className = 'date'; dateEl.textContent = msgDate;
         chatMessages.appendChild(dateEl);
     }
     const voiceData = parseVoiceMessage(content);
-    const msgEl = document.createElement('div');
-    msgEl.classList.add('message', 'sent', 'optimistic');
+    const fileData  = parseFileMessage(content);
+    const msgEl = document.createElement('div'); msgEl.classList.add('message', 'sent', 'optimistic');
     if (voiceData) msgEl.classList.add('voice-msg');
-    const senderSpan = document.createElement('span');
-    senderSpan.className = 'msg-sender';
-    senderSpan.textContent = users[currentUserId]?.username || 'Moi';
-    const metaSpan = document.createElement('span');
-    metaSpan.className = 'msg-meta';
-    metaSpan.textContent = `${msgTime} · ⏳`;
+    if (fileData)  msgEl.classList.add('file-msg');
+    const senderSpan = document.createElement('span'); senderSpan.className = 'msg-sender'; senderSpan.textContent = users[currentUserId]?.username || 'Moi';
+    const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta'; metaSpan.textContent = `${msgTime} · ⏳`;
     msgEl.appendChild(senderSpan);
-    if (voiceData) { msgEl.appendChild(createVoiceMessagePlayer(voiceData, true)); }
-    else            { msgEl.appendChild(document.createTextNode(content)); }
+    if (voiceData)    { msgEl.appendChild(createVoiceMessagePlayer(voiceData, true)); }
+    else if (fileData){ msgEl.appendChild(createFileMessageElement(fileData, true)); }
+    else              { msgEl.appendChild(document.createTextNode(content)); }
     msgEl.appendChild(metaSpan);
     chatMessages.appendChild(msgEl);
     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -1090,7 +1127,11 @@ function appendOptimisticMessage(content) {
 // ============================================================
 // ENVOI DE MESSAGES
 // ============================================================
-async function deleteMessage(messageId) {
+async function deleteMessage(messageId, filePath) {
+    // Supprimer le fichier du storage si présent
+    if (filePath) {
+        await supabase.storage.from(FILE_BUCKET).remove([filePath]).catch(e => console.warn('deleteFile:', e));
+    }
     const { error } = await supabase.from('messages').delete().eq('id', messageId);
     if (error) { console.error('deleteMessage:', error); return; }
     const el = chatMessages.querySelector(`[data-msg-id="${messageId}"]`);
@@ -1100,24 +1141,21 @@ async function deleteMessage(messageId) {
 
 async function sendMessage(userId, content) {
     const isVoice = content.startsWith('{"type":"__voice__"');
+    const isFile  = content.startsWith('{"type":"__file__"');
     let optimisticEl = null;
     if (!isVoice) optimisticEl = appendOptimisticMessage(content);
     isTyping = false; clearTimeout(typingTimeout); broadcastTyping(false);
-    const { data, error } = await supabase
-        .from('messages')
+    const { data, error } = await supabase.from('messages')
         .insert({ id_sent: userId, content, created_at: new Date().toISOString(), id_received: userSelect.value, read_at: null, latitude: null, longitude: null, city: null })
-        .select('id, id_sent, id_received, content, created_at, read_at, city')
-        .single();
+        .select('id, id_sent, id_received, content, created_at, read_at, city').single();
     if (error) { console.error('sendMessage:', error); optimisticEl?.remove(); return false; }
     if (optimisticEl) {
         optimisticEl.remove();
         if (!currentMessages.find(m => m.id === data.id)) {
-            currentMessages.push(data);
-            appendMessageElement(data);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            currentMessages.push(data); appendMessageElement(data); chatMessages.scrollTop = chatMessages.scrollHeight;
         }
     }
-    if (data.id) {
+    if (data.id && !isFile) {
         getGeolocationCached().then(async geo => {
             const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
             if (!city && !geo.latitude) return;
@@ -1131,11 +1169,8 @@ async function sendMessage(userId, content) {
 
 async function handleSend() {
     if (!currentUserId) { alert('Veuillez vous connecter pour envoyer un message'); return; }
-    const content = messageInput.value.trim();
-    if (!content) return;
-    messageInput.value = '';
-    messageInput.focus();
-    quickReplies.style.display = 'none';
+    const content = messageInput.value.trim(); if (!content) return;
+    messageInput.value = ''; messageInput.focus(); quickReplies.style.display = 'none';
     rawInputText = ''; prevConvertedValue = '';
     await sendMessage(currentUserId, content);
 }
@@ -1147,22 +1182,16 @@ messageInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preve
 // CONNEXION / DÉCONNEXION
 // ============================================================
 function showConnectedUI(username) {
-    loginContainer.style.display  = 'none';
-    connectedUser.style.display   = 'flex';
-    connectedUsername.textContent  = username;
+    loginContainer.style.display = 'none'; connectedUser.style.display = 'flex';
+    connectedUsername.textContent = username;
 }
 
 async function completeLogin(user, plainPassword) {
-    currentUserId = user.id;
-    users[user.id] = { id: user.id, username: user.username };
+    currentUserId = user.id; users[user.id] = { id: user.id, username: user.username };
     showConnectedUI(user.username);
     saveSession({ userId: user.id, username: user.username, plainPassword, issuedAt: Date.now(), expiresAt: Date.now() + SESSION_MS });
-    await getUsers();
-    await loadInitialMessages();
-    subscribeToConversation();
-    subscribeToTyping();
-    subscribeToPresence();
-    subscribeToIncomingCalls();
+    await getUsers(); await loadInitialMessages();
+    subscribeToConversation(); subscribeToTyping(); subscribeToPresence(); subscribeToIncomingCalls();
     getGeolocationCached().catch(() => {});
 }
 
@@ -1171,10 +1200,9 @@ async function login() {
     if (!username || !password) { alert('Veuillez remplir tous les champs'); return; }
     try {
         const { data, error } = await supabase.from('users').select('id, username, password').eq('username', username).single();
-        if (error || !data)             { alert('Utilisateur non trouvé'); return; }
+        if (error || !data) { alert('Utilisateur non trouvé'); return; }
         if (data.password !== password) { alert('Mot de passe incorrect'); return; }
-        await requestNotificationPermission();
-        await completeLogin(data, password);
+        await requestNotificationPermission(); await completeLogin(data, password);
     } catch (e) { console.error('login:', e); alert('Erreur de connexion'); }
 }
 
@@ -1188,9 +1216,7 @@ async function checkAutoLogin() {
     try {
         const { data, error } = await supabase.from('users').select('id, username, password').eq('id', pending.userId).single();
         if (error || !data || data.password !== pending.plainPassword) return false;
-        await requestNotificationPermission();
-        await completeLogin(data, pending.plainPassword);
-        return true;
+        await requestNotificationPermission(); await completeLogin(data, pending.plainPassword); return true;
     } catch { return false; }
 }
 
@@ -1209,11 +1235,8 @@ async function logout(options = {}) {
     closeEmojiPicker(); closeFontPicker(); resetFont();
     currentUserId = null; currentMessages = []; _geoCache = null; _geoPend = null;
     clearSession(); clearPresenceUI();
-    loginContainer.style.display  = 'block';
-    connectedUser.style.display   = 'none';
-    chatMessages.innerHTML        = '';
-    typingIndicator.style.display = 'none';
-    quickReplies.style.display    = 'none';
+    loginContainer.style.display = 'block'; connectedUser.style.display = 'none';
+    chatMessages.innerHTML = ''; typingIndicator.style.display = 'none'; quickReplies.style.display = 'none';
     if (reason) alert(reason);
 }
 
@@ -1222,16 +1245,9 @@ logoutButton.addEventListener('click', () => logout());
 loginPassword.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); login(); } });
 
 userSelect.addEventListener('change', async () => {
-    currentMessages = [];
-    typingIndicator.style.display = 'none';
-    quickReplies.style.display    = 'none';
+    currentMessages = []; typingIndicator.style.display = 'none'; quickReplies.style.display = 'none';
     isTyping = false; clearTimeout(typingTimeout);
-    if (currentUserId) {
-        subscribeToConversation();
-        subscribeToTyping();
-        await loadInitialMessages();
-        updatePresenceUI();
-    }
+    if (currentUserId) { subscribeToConversation(); subscribeToTyping(); await loadInitialMessages(); updatePresenceUI(); }
 });
 
 // ============================================================
@@ -1244,8 +1260,8 @@ function getVoiceSupportedMimeType() {
 }
 
 function getEventCoords(e) {
-    if (e.touches && e.touches.length > 0)              return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    if (e.changedTouches && e.changedTouches.length > 0) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+    if (e.touches && e.touches.length > 0)               return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    if (e.changedTouches && e.changedTouches.length > 0)  return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
     return { x: e.clientX, y: e.clientY };
 }
 
@@ -1283,11 +1299,8 @@ function onVoicePressMove(e) {
         const pct = Math.min(Math.abs(dy) / 50, 1);
         if (pct >= 1) { lockVoiceRecording(); return; }
         indicator.textContent = '↑ Relâcher pour verrouiller';
-        indicator.style.color = 'var(--accent)';
-        indicator.classList.add('show');
-    } else {
-        indicator.classList.remove('show');
-    }
+        indicator.style.color = 'var(--accent)'; indicator.classList.add('show');
+    } else { indicator.classList.remove('show'); }
 }
 
 function hideVoiceSlideIndicator() { document.getElementById('voice-slide-indicator')?.classList.remove('show'); }
@@ -1365,8 +1378,7 @@ function cleanupVoiceRecording() {
     document.getElementById('voice-slide-hint')?.classList.remove('visible');
     document.getElementById('voice-locked-bar')?.classList.remove('visible');
     document.getElementById('voice-effects-panel')?.classList.remove('visible');
-    const vlbTimer = document.getElementById('vlb-timer');
-    const hintTimer = document.getElementById('voice-hint-timer');
+    const vlbTimer = document.getElementById('vlb-timer'), hintTimer = document.getElementById('voice-hint-timer');
     if (vlbTimer)  vlbTimer.textContent  = '0:00';
     if (hintTimer) hintTimer.textContent = '0:00';
     const pauseBtn = document.getElementById('vlb-pause-btn');
@@ -1380,8 +1392,7 @@ function startVoiceTimer() {
         if (!recordingStartTime) return;
         const elapsed = Math.floor((Date.now() - recordingStartTime - pausedDuration) / 1000);
         const text = formatVoiceDuration(elapsed);
-        const hintTimer = document.getElementById('voice-hint-timer');
-        const vlbTimer  = document.getElementById('vlb-timer');
+        const hintTimer = document.getElementById('voice-hint-timer'), vlbTimer = document.getElementById('vlb-timer');
         if (hintTimer) hintTimer.textContent = text;
         if (vlbTimer)  vlbTimer.textContent  = text;
         if (elapsed >= MAX_VOICE_DURATION) stopVoiceAndSend();
@@ -1402,10 +1413,7 @@ function startVoiceWaveform() {
         const W = canvas.width, H = canvas.height;
         ctx.clearRect(0, 0, W, H); ctx.beginPath(); ctx.strokeStyle = 'rgba(239,68,68,0.85)'; ctx.lineWidth = 1.5;
         const step = W / buf.length;
-        buf.forEach((v, i) => {
-            const y = ((v / 128 - 1) * H * 0.45) + H / 2;
-            i === 0 ? ctx.moveTo(0, y) : ctx.lineTo(i * step, y);
-        });
+        buf.forEach((v, i) => { const y = ((v / 128 - 1) * H * 0.45) + H / 2; i === 0 ? ctx.moveTo(0, y) : ctx.lineTo(i * step, y); });
         ctx.stroke();
     }
     draw();
@@ -1413,9 +1421,7 @@ function startVoiceWaveform() {
 
 async function processAndSendVoice(blob, mimeType, durationSeconds) {
     let processedBlob = blob;
-    if (voiceEffect !== 'normal') {
-        try { processedBlob = await applyVoiceEffectDSP(blob); } catch { processedBlob = blob; }
-    }
+    if (voiceEffect !== 'normal') { try { processedBlob = await applyVoiceEffectDSP(blob); } catch { processedBlob = blob; } }
     const arrayBuffer = await processedBlob.arrayBuffer();
     const uint8 = new Uint8Array(arrayBuffer);
     let base64 = '';
@@ -1442,9 +1448,7 @@ async function applyVoiceEffectDSP(blob) {
         for (let i = 0; i < n; i++) { const x = (i * 2) / n - 1; curve[i] = (Math.PI + 100) * x / (Math.PI + 100 * Math.abs(x)); }
         waveshaper.curve = curve; waveshaper.oversample = '4x';
         source.connect(waveshaper); waveshaper.connect(offlineCtx.destination);
-    } else {
-        source.connect(offlineCtx.destination);
-    }
+    } else { source.connect(offlineCtx.destination); }
     source.start(0);
     const rendered = await offlineCtx.startRendering();
     return audioBufferToWav(rendered);
@@ -1460,10 +1464,7 @@ function audioBufferToWav(buffer) {
     view.setUint16(32,numCh*2,true); view.setUint16(34,16,true); ws(36,'data');
     view.setUint32(40,data.length*2,true);
     let off = 44;
-    for (let i = 0; i < data.length; i++) {
-        const s = Math.max(-1,Math.min(1,data[i]));
-        view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true); off += 2;
-    }
+    for (let i = 0; i < data.length; i++) { const s = Math.max(-1,Math.min(1,data[i])); view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true); off += 2; }
     return new Blob([ab], { type: 'audio/wav' });
 }
 
@@ -1520,9 +1521,7 @@ function injectVoiceUI() {
         <div class="vep-section">
             <div class="vep-label">🎤 Voix</div>
             <div class="vep-chips">
-                ${Object.entries(VOICE_EFFECTS).map(([k,v]) =>
-                    `<button class="vep-chip voice-chip ${k==='normal'?'active':''}" data-effect="${k}">${v.label}</button>`
-                ).join('')}
+                ${Object.entries(VOICE_EFFECTS).map(([k,v]) => `<button class="vep-chip voice-chip ${k==='normal'?'active':''}" data-effect="${k}">${v.label}</button>`).join('')}
             </div>
         </div>
         <div class="vep-section">
@@ -1537,8 +1536,7 @@ function injectVoiceUI() {
         </div>`;
     chatContainer.insertBefore(effectsPanel, chatInputEl);
 
-    const lockedBar = document.createElement('div');
-    lockedBar.id = 'voice-locked-bar';
+    const lockedBar = document.createElement('div'); lockedBar.id = 'voice-locked-bar';
     lockedBar.innerHTML = `
         <div class="vlb-row">
             <span class="vlb-rec-dot"></span>
@@ -1553,17 +1551,11 @@ function injectVoiceUI() {
         </div>`;
     chatContainer.insertBefore(lockedBar, chatInputEl);
 
-    const slideHint = document.createElement('div');
-    slideHint.id = 'voice-slide-hint';
-    slideHint.innerHTML = `
-        <span class="hint-cancel">← Annuler</span>
-        <span class="hint-timer" id="voice-hint-timer">0:00</span>
-        <span class="hint-lock">↑ Verrouiller</span>`;
+    const slideHint = document.createElement('div'); slideHint.id = 'voice-slide-hint';
+    slideHint.innerHTML = `<span class="hint-cancel">← Annuler</span><span class="hint-timer" id="voice-hint-timer">0:00</span><span class="hint-lock">↑ Verrouiller</span>`;
     chatContainer.insertBefore(slideHint, chatInputEl);
 
-    const slideInd = document.createElement('div');
-    slideInd.className = 'voice-slide-indicator';
-    slideInd.id = 'voice-slide-indicator';
+    const slideInd = document.createElement('div'); slideInd.className = 'voice-slide-indicator'; slideInd.id = 'voice-slide-indicator';
     chatContainer.appendChild(slideInd);
 
     const micBtn = document.createElement('button');
@@ -1580,26 +1572,16 @@ function injectVoiceUI() {
     document.getElementById('vlb-cancel-btn').addEventListener('click', cancelVoiceRecording);
     document.getElementById('vlb-pause-btn').addEventListener('click', toggleVoicePause);
     document.getElementById('vlb-send-btn').addEventListener('click', stopVoiceAndSend);
-    document.getElementById('vlb-effects-btn').addEventListener('click', () => {
-        document.getElementById('voice-effects-panel').classList.toggle('visible');
-    });
+    document.getElementById('vlb-effects-btn').addEventListener('click', () => { document.getElementById('voice-effects-panel').classList.toggle('visible'); });
 
     effectsPanel.querySelectorAll('.voice-chip').forEach(chip => {
-        chip.addEventListener('click', () => {
-            voiceEffect = chip.dataset.effect;
-            effectsPanel.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('active'));
-            chip.classList.add('active');
-        });
+        chip.addEventListener('click', () => { voiceEffect = chip.dataset.effect; effectsPanel.querySelectorAll('.voice-chip').forEach(c => c.classList.remove('active')); chip.classList.add('active'); });
     });
-
     effectsPanel.querySelectorAll('.ambiance-chip').forEach(chip => {
         chip.addEventListener('click', () => {
             voiceAmbiance = chip.dataset.ambiance === 'none' ? null : chip.dataset.ambiance;
-            effectsPanel.querySelectorAll('.ambiance-chip').forEach(c => c.classList.remove('active'));
-            chip.classList.add('active');
-            if (isRecording && voiceAudioContext) {
-                voiceAmbiance ? startVoiceAmbianceSound(voiceAmbiance) : stopVoiceAmbianceSound();
-            }
+            effectsPanel.querySelectorAll('.ambiance-chip').forEach(c => c.classList.remove('active')); chip.classList.add('active');
+            if (isRecording && voiceAudioContext) { voiceAmbiance ? startVoiceAmbianceSound(voiceAmbiance) : stopVoiceAmbianceSound(); }
         });
     });
 }
@@ -1622,20 +1604,11 @@ function startRingtone(type) {
         osc.start(startTime); osc.stop(startTime + duration);
     }
     if (type === 'incoming') {
-        function playIncomingCycle() {
-            if (!ringtoneCtx || callState === 'idle') return;
-            const now = ringtoneCtx.currentTime;
-            playTone(880, 0.3, now); playTone(660, 0.3, now + 0.35);
-        }
-        playIncomingCycle();
-        ringtoneInterval = setInterval(playIncomingCycle, 2000);
+        function playIncomingCycle() { if (!ringtoneCtx || callState === 'idle') return; const now = ringtoneCtx.currentTime; playTone(880, 0.3, now); playTone(660, 0.3, now + 0.35); }
+        playIncomingCycle(); ringtoneInterval = setInterval(playIncomingCycle, 2000);
     } else {
-        function playOutgoingCycle() {
-            if (!ringtoneCtx || callState === 'idle') return;
-            playTone(440, 0.5, ringtoneCtx.currentTime);
-        }
-        playOutgoingCycle();
-        ringtoneInterval = setInterval(playOutgoingCycle, 3000);
+        function playOutgoingCycle() { if (!ringtoneCtx || callState === 'idle') return; playTone(440, 0.5, ringtoneCtx.currentTime); }
+        playOutgoingCycle(); ringtoneInterval = setInterval(playOutgoingCycle, 3000);
     }
 }
 
@@ -1645,11 +1618,8 @@ function stopRingtone() {
 }
 
 // ============================================================
-// APPELS — VIDÉO bidirectionnelle
+// APPELS — VIDÉO bidirectionnelle (CORRECTIF PRINCIPAL)
 // ============================================================
-
-let currentFacingMode = 'user'; // 'user' = frontale, 'environment' = arrière
-
 async function toggleVideo() {
     if (callState !== 'active' || !peerConnection) return;
     if (!isVideoEnabled) { await enableLocalVideo(); }
@@ -1660,38 +1630,20 @@ async function enableLocalVideo(facingMode) {
     const facing = facingMode || currentFacingMode;
     try {
         if (localVideoStream) { localVideoStream.getTracks().forEach(t => t.stop()); localVideoStream = null; }
-
         localVideoStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false
+            video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
         });
         currentFacingMode = facing;
-
         const videoTrack = localVideoStream.getVideoTracks()[0];
-
-        // Si un sender vidéo existe, remplacer la piste (pas de renégociation)
         const existingSender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
-        if (existingSender) {
-            await existingSender.replaceTrack(videoTrack);
-        } else {
-            // Ajouter la piste → déclenche onnegotiationneeded → renégociation automatique
-            peerConnection.addTrack(videoTrack, localVideoStream);
-        }
-
-        // Aperçu local
+        if (existingSender) { await existingSender.replaceTrack(videoTrack); }
+        else                { peerConnection.addTrack(videoTrack, localVideoStream); }
         const localVid = document.getElementById('call-local-video');
-        if (localVid) localVid.srcObject = localVideoStream;
-
+        if (localVid) { localVid.srcObject = localVideoStream; }
         isVideoEnabled = true;
-        updateVideoLayout();
-        updateVideoButton(true);
-        updateFlipButton(true);
-
+        updateVideoLayout(); updateVideoButton(true); updateFlipButton(true);
         await sendCallSignal(callPeerUserId, { type: 'video_enabled', callId: currentCallId, callerId: currentUserId });
-    } catch (err) {
-        console.error('[Video] Caméra inaccessible:', err);
-        alert('Caméra inaccessible. Vérifiez les permissions.');
-    }
+    } catch (err) { console.error('[Video] Caméra inaccessible:', err); alert('Caméra inaccessible. Vérifiez les permissions.'); }
 }
 
 function disableLocalVideo() {
@@ -1704,28 +1656,17 @@ function disableLocalVideo() {
         localVideoStream = null;
     }
     const localVid = document.getElementById('call-local-video');
-    if (localVid) localVid.srcObject = null;
-
+    if (localVid) { localVid.srcObject = null; }
     isVideoEnabled = false;
-    updateVideoLayout();
-    updateVideoButton(false);
-    updateFlipButton(false);
+    updateVideoLayout(); updateVideoButton(false); updateFlipButton(false);
     sendCallSignal(callPeerUserId, { type: 'video_disabled', callId: currentCallId, callerId: currentUserId }).catch(() => {});
 }
 
 async function flipCamera() {
     if (!isVideoEnabled) return;
-    const newFacing = currentFacingMode === 'user' ? 'environment' : 'user';
-    await enableLocalVideo(newFacing);
+    await enableLocalVideo(currentFacingMode === 'user' ? 'environment' : 'user');
 }
 
-/**
- * Layout vidéo selon état des caméras :
- *  - Aucune  → mode audio (avatar), zone vidéo cachée
- *  - Remote uniquement → remote plein écran + PiP initiale locale
- *  - Local uniquement  → local plein écran + PiP initiale remote
- *  - Les deux → split 50/50 vertical
- */
 function updateVideoLayout() {
     const overlay    = document.getElementById('call-overlay');
     const videoArea  = document.getElementById('call-video-area');
@@ -1735,14 +1676,11 @@ function updateVideoLayout() {
     const infoArea   = document.getElementById('call-info');
     if (!overlay || !videoArea) return;
 
-    // Nettoyer les PiP avatars existants
     document.getElementById('call-local-pip')?.remove();
     document.getElementById('call-remote-pip')?.remove();
 
     if (!isVideoEnabled && !remoteVideoEnabled) {
-        // Mode audio pur
-        overlay.dataset.videoMode = 'none';
-        videoArea.style.display = 'none';
+        overlay.dataset.videoMode = 'none'; videoArea.style.display = 'none';
         if (avatarArea) avatarArea.style.display = 'flex';
         if (infoArea)   infoArea.style.display   = 'flex';
         if (localVid)   { localVid.className = '';  localVid.style.display  = 'none'; }
@@ -1750,41 +1688,32 @@ function updateVideoLayout() {
         return;
     }
 
-    // Mode vidéo → cacher l'avatar principal, afficher la zone vidéo
     videoArea.style.display = 'flex';
     if (avatarArea) avatarArea.style.display = 'none';
-    if (infoArea)   infoArea.style.display   = 'none'; // masqué en mode vidéo
+    if (infoArea)   infoArea.style.display   = 'none';
 
     if (isVideoEnabled && remoteVideoEnabled) {
-        // Split 50/50
         overlay.dataset.videoMode = 'both';
         if (localVid)  { localVid.style.display  = 'block'; localVid.className  = 'call-video-half'; }
         if (remoteVid) { remoteVid.style.display = 'block'; remoteVid.className = 'call-video-half'; }
     } else if (remoteVideoEnabled && !isVideoEnabled) {
-        // Remote en plein écran, PiP initiale locale
         overlay.dataset.videoMode = 'remote-only';
         if (remoteVid) { remoteVid.style.display = 'block'; remoteVid.className = 'call-video-full'; }
-        if (localVid)  { localVid.style.display  = 'none'; localVid.className  = ''; }
-        const pip = document.createElement('div');
-        pip.id = 'call-local-pip'; pip.className = 'call-pip-avatar';
-        const myName = users[currentUserId]?.username || 'Moi';
-        pip.textContent = myName.charAt(0).toUpperCase();
+        if (localVid)  { localVid.style.display  = 'none';  localVid.className  = ''; }
+        const pip = document.createElement('div'); pip.id = 'call-local-pip'; pip.className = 'call-pip-avatar';
+        pip.textContent = (users[currentUserId]?.username || 'Moi').charAt(0).toUpperCase();
         videoArea.appendChild(pip);
     } else if (isVideoEnabled && !remoteVideoEnabled) {
-        // Local en plein écran, PiP initiale remote
         overlay.dataset.videoMode = 'local-only';
         if (localVid)  { localVid.style.display  = 'block'; localVid.className  = 'call-video-full'; }
         if (remoteVid) { remoteVid.style.display = 'none';  remoteVid.className = ''; }
-        const pip = document.createElement('div');
-        pip.id = 'call-remote-pip'; pip.className = 'call-pip-avatar call-pip-avatar--remote';
-        const peerName = users[callPeerUserId]?.username || '?';
-        pip.textContent = peerName.charAt(0).toUpperCase();
+        const pip = document.createElement('div'); pip.id = 'call-remote-pip'; pip.className = 'call-pip-avatar call-pip-avatar--remote';
+        pip.textContent = (users[callPeerUserId]?.username || '?').charAt(0).toUpperCase();
         videoArea.appendChild(pip);
     }
 
-    // Remonter les contrôles et réactions par-dessus la vidéo
     const ctrlsEl = document.getElementById('call-controls-group');
-    const reactEl = document.getElementById('call-reaction-trigger');
+    const reactEl  = document.getElementById('call-reaction-trigger');
     const actionsEl = document.querySelector('.call-actions');
     if (ctrlsEl)   ctrlsEl.style.zIndex   = '10';
     if (reactEl)   reactEl.style.zIndex   = '10';
@@ -1792,20 +1721,15 @@ function updateVideoLayout() {
 }
 
 function updateVideoButton(enabled) {
-    const btn = document.getElementById('call-btn-video');
-    if (!btn) return;
-    if (enabled) {
-        btn.classList.add('active');
-        btn.innerHTML = `<span class="call-btn-icon">📷</span><span class="call-btn-label">Cam ON</span>`;
-    } else {
-        btn.classList.remove('active');
-        btn.innerHTML = `<span class="call-btn-icon">📷</span><span class="call-btn-label">Caméra</span>`;
-    }
+    const btn = document.getElementById('call-btn-video'); if (!btn) return;
+    btn.innerHTML = enabled
+        ? `<span class="call-btn-icon">📷</span><span class="call-btn-label">Cam ON</span>`
+        : `<span class="call-btn-icon">📷</span><span class="call-btn-label">Caméra</span>`;
+    btn.classList.toggle('active', enabled);
 }
 
 function updateFlipButton(show) {
-    const btn = document.getElementById('call-btn-flip');
-    if (!btn) return;
+    const btn = document.getElementById('call-btn-flip'); if (!btn) return;
     btn.style.display = show ? 'flex' : 'none';
 }
 
@@ -1814,33 +1738,26 @@ function updateFlipButton(show) {
 // ============================================================
 async function sendCallReaction(emoji) {
     showReactionBubble(emoji, 'local');
-    if (callPeerUserId) {
-        await sendCallSignal(callPeerUserId, { type: 'reaction', emoji, callId: currentCallId, callerId: currentUserId });
-    }
+    if (callPeerUserId) await sendCallSignal(callPeerUserId, { type: 'reaction', emoji, callId: currentCallId, callerId: currentUserId });
 }
 
 function showReactionBubble(emoji, origin) {
-    const container = document.getElementById('call-reactions-area');
-    if (!container) return;
+    const container = document.getElementById('call-reactions-area'); if (!container) return;
     const bubble = document.createElement('div');
-    bubble.className = `call-reaction-bubble call-reaction-${origin}`;
-    bubble.textContent = emoji;
+    bubble.className = `call-reaction-bubble call-reaction-${origin}`; bubble.textContent = emoji;
     const xRange = origin === 'local' ? [55, 85] : [10, 40];
     bubble.style.left = `${xRange[0] + Math.random() * (xRange[1] - xRange[0])}%`;
     container.appendChild(bubble);
     bubble.addEventListener('animationend', () => bubble.remove());
 }
 
-function toggleReactionPicker() {
-    document.getElementById('call-reaction-picker')?.classList.toggle('visible');
-}
+function toggleReactionPicker() { document.getElementById('call-reaction-picker')?.classList.toggle('visible'); }
 
 // ============================================================
-// APPELS — Affichage écran d'appel
+// APPELS — Affichage écran
 // ============================================================
 function showCallScreen(mode) {
-    const overlay = document.getElementById('call-overlay');
-    if (!overlay) return;
+    const overlay = document.getElementById('call-overlay'); if (!overlay) return;
     const peerName = users[callPeerUserId]?.username || 'Inconnu';
     document.getElementById('call-peer-name').textContent   = peerName;
     document.getElementById('call-peer-avatar').textContent = peerName.charAt(0).toUpperCase();
@@ -1854,39 +1771,26 @@ function showCallScreen(mode) {
     const videoBtn  = document.getElementById('call-btn-video');
     const flipBtn   = document.getElementById('call-btn-flip');
 
-    // Reset
     [acceptBtn, rejectBtn, hangupBtn].forEach(b => { if(b) b.style.display = 'none'; });
 
     if (mode === 'calling') {
-        statusEl.textContent   = 'Appel en cours…';
-        timerEl.style.display  = 'none';
-        hangupBtn.style.display = 'flex';
-        ctrlsEl.style.display  = 'none';
-        reactEl.style.display  = 'none';
+        statusEl.textContent = 'Appel en cours…'; timerEl.style.display = 'none';
+        hangupBtn.style.display = 'flex'; ctrlsEl.style.display = 'none'; reactEl.style.display = 'none';
         startRingtone('outgoing');
     } else if (mode === 'ringing') {
-        statusEl.textContent    = 'Appel entrant…';
-        timerEl.style.display   = 'none';
-        acceptBtn.style.display = 'flex';
-        rejectBtn.style.display = 'flex';
-        ctrlsEl.style.display   = 'none';
-        reactEl.style.display   = 'none';
+        statusEl.textContent = 'Appel entrant…'; timerEl.style.display = 'none';
+        acceptBtn.style.display = 'flex'; rejectBtn.style.display = 'flex';
+        ctrlsEl.style.display = 'none'; reactEl.style.display = 'none';
         startRingtone('incoming');
     } else if (mode === 'active') {
-        statusEl.textContent    = 'En communication';
-        timerEl.style.display   = 'block';
-        hangupBtn.style.display = 'flex';
-        ctrlsEl.style.display   = 'flex';
-        reactEl.style.display   = 'flex';
+        statusEl.textContent = 'En communication'; timerEl.style.display = 'block';
+        hangupBtn.style.display = 'flex'; ctrlsEl.style.display = 'flex'; reactEl.style.display = 'flex';
         if (videoBtn) videoBtn.style.display = 'flex';
-        if (flipBtn)  flipBtn.style.display  = 'none'; // visible seulement quand cam active
+        if (flipBtn)  flipBtn.style.display  = 'none';
         stopRingtone(); startCallTimer();
     } else if (mode === 'reconnecting') {
-        statusEl.textContent    = 'Reconnexion…';
-        timerEl.style.display   = 'none';
-        hangupBtn.style.display = 'flex';
-        ctrlsEl.style.display   = 'flex';
-        reactEl.style.display   = 'none';
+        statusEl.textContent = 'Reconnexion…'; timerEl.style.display = 'none';
+        hangupBtn.style.display = 'flex'; ctrlsEl.style.display = 'flex'; reactEl.style.display = 'none';
         if (videoBtn) videoBtn.style.display = 'flex';
     }
 
@@ -1895,15 +1799,11 @@ function showCallScreen(mode) {
 }
 
 function hideCallScreen() {
-    const overlay = document.getElementById('call-overlay');
-    if (!overlay) return;
-    overlay.classList.remove('visible');
-    delete overlay.dataset.videoMode;
+    const overlay = document.getElementById('call-overlay'); if (!overlay) return;
+    overlay.classList.remove('visible'); delete overlay.dataset.videoMode;
     setTimeout(() => { overlay.style.display = 'none'; }, 400);
     stopCallTimer(); stopRingtone();
     document.getElementById('call-reaction-picker')?.classList.remove('visible');
-
-    // Reset vidéo
     const videoArea = document.getElementById('call-video-area');
     if (videoArea) videoArea.style.display = 'none';
     const localVid  = document.getElementById('call-local-video');
@@ -1912,24 +1812,19 @@ function hideCallScreen() {
     if (remoteVid) { remoteVid.srcObject = null; remoteVid.className = ''; remoteVid.style.display = 'none'; }
     document.getElementById('call-local-pip')?.remove();
     document.getElementById('call-remote-pip')?.remove();
-
-    // Remettre l'avatar et les infos
-    const avatarArea = document.getElementById('call-avatar-area');
-    const infoArea   = document.getElementById('call-info');
+    const avatarArea = document.getElementById('call-avatar-area'), infoArea = document.getElementById('call-info');
     if (avatarArea) avatarArea.style.display = 'flex';
     if (infoArea)   infoArea.style.display   = 'flex';
 }
 
 // ============================================================
-// BOUTON TÉLÉPHONE — Visible seulement si le peer est en ligne
+// BOUTON TÉLÉPHONE
 // ============================================================
 function updateCallButtonState() {
-    const btn = document.getElementById('call-audio-btn');
-    if (!btn) return;
+    const btn = document.getElementById('call-audio-btn'); if (!btn) return;
     const selId = userSelect.value;
     const peerIsOnline = onlineUsers.has(selId);
-    const show = !!(currentUserId && selId && selId !== String(currentUserId) && peerIsOnline);
-    btn.style.display = show ? 'flex' : 'none';
+    btn.style.display = (currentUserId && selId && selId !== String(currentUserId) && peerIsOnline) ? 'flex' : 'none';
 }
 
 function startCallTimer() {
@@ -1943,11 +1838,7 @@ function startCallTimer() {
     }, 1000);
 }
 
-function stopCallTimer() {
-    clearInterval(callTimer); callTimer = null; callDuration = 0;
-    const el = document.getElementById('call-timer-display');
-    if (el) el.textContent = '00:00';
-}
+function stopCallTimer() { clearInterval(callTimer); callTimer = null; callDuration = 0; const el = document.getElementById('call-timer-display'); if (el) el.textContent = '00:00'; }
 
 async function getLocalStream() {
     if (localStream && localStream.active) return localStream;
@@ -1960,6 +1851,9 @@ function releaseLocalStream() {
     if (localVideoStream) { localVideoStream.getTracks().forEach(t => t.stop()); localVideoStream = null; }
 }
 
+// ============================================================
+// WEBRTC — PeerConnection CORRIGÉE (audio + vidéo remote)
+// ============================================================
 function buildPeerConnection() {
     if (peerConnection) { try { peerConnection.close(); } catch {} peerConnection = null; }
     peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -1972,42 +1866,82 @@ function buildPeerConnection() {
         });
     };
 
+    // ─── CORRECTIF AUDIO + VIDÉO REMOTE ──────────────────────────
+    // On maintient un MediaStream remote unique pour éviter
+    // les conflits entre pistes audio et vidéo.
+    const remoteStream = new MediaStream();
+
     peerConnection.ontrack = (event) => {
-        const stream = event.streams[0];
-        if (event.track.kind === 'audio') {
-            if (!remoteAudio) { remoteAudio = new Audio(); remoteAudio.autoplay = true; }
-            if (!remoteAudio.srcObject) remoteAudio.srcObject = stream;
-        } else if (event.track.kind === 'video') {
+        const track = event.track;
+        console.log('[WebRTC] ontrack kind:', track.kind, 'state:', track.readyState);
+
+        // Ajouter la piste au stream remote partagé
+        remoteStream.addTrack(track);
+
+        if (track.kind === 'audio') {
+            // AUDIO : créer/réutiliser l'élément Audio et y brancher le stream
+            if (!remoteAudio) {
+                remoteAudio = new Audio();
+                remoteAudio.autoplay = true;
+                // Sur iOS, il faut parfois forcer la lecture
+                remoteAudio.setAttribute('playsinline', 'true');
+            }
+            // Brancher le stream complet (il peut contenir audio + vidéo, c'est ok)
+            remoteAudio.srcObject = remoteStream;
+            // Forcer la lecture (nécessaire sur certains navigateurs)
+            remoteAudio.play().catch(err => {
+                console.warn('[Audio] Lecture auto bloquée:', err);
+                // Retry à la première interaction utilisateur
+                const resumeAudio = () => { remoteAudio?.play().catch(() => {}); document.removeEventListener('click', resumeAudio); };
+                document.addEventListener('click', resumeAudio);
+            });
+        }
+
+        if (track.kind === 'video') {
             remoteVideoEnabled = true;
             const remoteVid = document.getElementById('call-remote-video');
-            if (remoteVid) remoteVid.srcObject = stream;
+            if (remoteVid) {
+                remoteVid.srcObject = remoteStream;
+                remoteVid.play().catch(err => console.warn('[Video remote] Lecture auto:', err));
+            }
             updateVideoLayout();
         }
-        // Piste stoppée par le peer (caméra coupée)
-        event.track.onended = () => {
-            if (event.track.kind === 'video') {
+
+        // Piste stoppée (caméra coupée par le peer)
+        track.onended = () => {
+            if (track.kind === 'video') {
                 remoteVideoEnabled = false;
                 const remoteVid = document.getElementById('call-remote-video');
-                if (remoteVid) { remoteVid.srcObject = null; }
+                if (remoteVid) remoteVid.srcObject = null;
                 updateVideoLayout();
             }
         };
+
+        track.onmute = () => {
+            if (track.kind === 'video') { remoteVideoEnabled = false; updateVideoLayout(); }
+        };
+
+        track.onunmute = () => {
+            if (track.kind === 'video') { remoteVideoEnabled = true; updateVideoLayout(); }
+        };
     };
+    // ─────────────────────────────────────────────────────────────
 
     peerConnection.onconnectionstatechange = () => {
         const state = peerConnection?.connectionState;
+        console.log('[WebRTC] connectionState:', state);
         if (state === 'connected') {
             callReconnectAttempts = 0;
             if (callState !== 'active') { callState = 'active'; showCallScreen('active'); }
-        } else if (state === 'disconnected' || state === 'failed') {
-            handleCallDisconnect();
-        }
+        } else if (state === 'disconnected' || state === 'failed') { handleCallDisconnect(); }
     };
+
     peerConnection.oniceconnectionstatechange = () => {
+        console.log('[WebRTC] iceConnectionState:', peerConnection?.iceConnectionState);
         if (peerConnection?.iceConnectionState === 'failed') handleCallDisconnect();
     };
 
-    // Renégociation automatique quand addTrack est appelé
+    // Renégociation automatique (pour ajout de piste vidéo)
     peerConnection.onnegotiationneeded = async () => {
         if (callState !== 'active') return;
         try {
@@ -2032,9 +1966,8 @@ async function initiateCall() {
     currentCallId = crypto.randomUUID(); isVideoEnabled = false; remoteVideoEnabled = false;
     showCallScreen('calling');
     let stream;
-    try { stream = await getLocalStream(); } catch {
-        callState = 'idle'; currentCallId = null; hideCallScreen(); alert('Microphone inaccessible.'); return;
-    }
+    try { stream = await getLocalStream(); }
+    catch { callState = 'idle'; currentCallId = null; hideCallScreen(); alert('Microphone inaccessible.'); return; }
     const pc = buildPeerConnection();
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
     const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
@@ -2054,13 +1987,11 @@ async function initiateCall() {
 async function acceptCall() {
     if (callState !== 'ringing' || !currentCallId) return;
     callState = 'active'; stopRingtone();
-    const offer = _pendingCallOffer;
-    if (!offer) { endCall(); return; }
+    const offer = _pendingCallOffer; if (!offer) { endCall(); return; }
     isVideoEnabled = false; remoteVideoEnabled = false;
     let stream;
-    try { stream = await getLocalStream(); } catch {
-        callState = 'idle'; hideCallScreen(); alert('Microphone inaccessible.'); return;
-    }
+    try { stream = await getLocalStream(); }
+    catch { callState = 'idle'; hideCallScreen(); alert('Microphone inaccessible.'); return; }
     const pc = buildPeerConnection();
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
@@ -2088,11 +2019,11 @@ async function hangUp() {
 }
 
 function endCall() {
-    clearInterval(callPollInterval); callPollInterval = null;
+    clearInterval(callTimer); callTimer = null;
     stopRingtone(); stopCallTimer();
     if (peerConnection) { try { peerConnection.close(); } catch {} peerConnection = null; }
     releaseLocalStream();
-    if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio = null; }
+    if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio.pause(); remoteAudio = null; }
     callState = 'idle'; currentCallId = null; callPeerUserId = null;
     callReconnectAttempts = 0; isMuted = false; isSpeakerOn = false;
     isVideoEnabled = false; remoteVideoEnabled = false; currentFacingMode = 'user';
@@ -2134,10 +2065,11 @@ function toggleMute() {
 }
 
 function updateMuteButton() {
-    const btn = document.getElementById('call-btn-mute');
-    if (!btn) return;
-    if (isMuted) { btn.classList.add('active'); btn.innerHTML = `<span class="call-btn-icon">🔇</span><span class="call-btn-label">Muet</span>`; }
-    else         { btn.classList.remove('active'); btn.innerHTML = `<span class="call-btn-icon">🎤</span><span class="call-btn-label">Micro</span>`; }
+    const btn = document.getElementById('call-btn-mute'); if (!btn) return;
+    btn.innerHTML = isMuted
+        ? `<span class="call-btn-icon">🔇</span><span class="call-btn-label">Muet</span>`
+        : `<span class="call-btn-icon">🎤</span><span class="call-btn-label">Micro</span>`;
+    btn.classList.toggle('active', isMuted);
 }
 
 function toggleSpeaker() {
@@ -2147,14 +2079,15 @@ function toggleSpeaker() {
 }
 
 function updateSpeakerButton() {
-    const btn = document.getElementById('call-btn-speaker');
-    if (!btn) return;
-    if (isSpeakerOn) { btn.classList.add('active'); btn.innerHTML = `<span class="call-btn-icon">🔊</span><span class="call-btn-label">HP actif</span>`; }
-    else             { btn.classList.remove('active'); btn.innerHTML = `<span class="call-btn-icon">🔈</span><span class="call-btn-label">HP</span>`; }
+    const btn = document.getElementById('call-btn-speaker'); if (!btn) return;
+    btn.innerHTML = isSpeakerOn
+        ? `<span class="call-btn-icon">🔊</span><span class="call-btn-label">HP actif</span>`
+        : `<span class="call-btn-icon">🔈</span><span class="call-btn-label">HP</span>`;
+    btn.classList.toggle('active', isSpeakerOn);
 }
 
 // ============================================================
-// APPELS — Injection UI complète
+// APPELS — Injection UI
 // ============================================================
 function injectCallUI() {
     const userSelectionEl = document.querySelector('.user-selection');
@@ -2170,12 +2103,10 @@ function injectCallUI() {
     overlay.id = 'call-overlay'; overlay.style.display = 'none';
     overlay.innerHTML = `
         <div id="call-screen">
-            <!-- Zone vidéo bidirectionnelle -->
             <div id="call-video-area" style="display:none;">
                 <video id="call-remote-video" autoplay playsinline></video>
                 <video id="call-local-video"  autoplay playsinline muted></video>
             </div>
-            <!-- Avatar (mode audio) -->
             <div class="call-avatar-wrap" id="call-avatar-area">
                 <div class="call-avatar-ring call-avatar-ring--1"></div>
                 <div class="call-avatar-ring call-avatar-ring--2"></div>
@@ -2187,7 +2118,6 @@ function injectCallUI() {
                 <div class="call-status-text" id="call-status-text">Appel en cours…</div>
                 <div class="call-timer-display" id="call-timer-display" style="display:none;">00:00</div>
             </div>
-            <!-- Contrôles -->
             <div class="call-controls-group" id="call-controls-group" style="display:none;">
                 <button class="call-ctrl-btn" id="call-btn-mute">
                     <span class="call-btn-icon">🎤</span><span class="call-btn-label">Micro</span>
@@ -2202,7 +2132,6 @@ function injectCallUI() {
                     <span class="call-btn-icon">🔄</span><span class="call-btn-label">Retourner</span>
                 </button>
             </div>
-            <!-- Réactions -->
             <div class="call-reaction-row" id="call-reaction-trigger" style="display:none;">
                 <button class="call-reaction-open-btn" id="call-reaction-open-btn">😊 Réaction</button>
                 <div class="call-reaction-picker" id="call-reaction-picker">
@@ -2210,7 +2139,6 @@ function injectCallUI() {
                 </div>
             </div>
             <div id="call-reactions-area"></div>
-            <!-- Boutons principaux -->
             <div class="call-actions">
                 <button class="call-action-btn call-action-accept" id="call-btn-accept"><span>📞</span></button>
                 <button class="call-action-btn call-action-reject" id="call-btn-reject"><span>📵</span></button>
@@ -2232,19 +2160,12 @@ function injectCallUI() {
     document.getElementById('call-btn-video').addEventListener('click', toggleVideo);
     document.getElementById('call-btn-flip').addEventListener('click', flipCamera);
 
-    document.getElementById('call-reaction-open-btn').addEventListener('click', e => {
-        e.stopPropagation(); toggleReactionPicker();
-    });
+    document.getElementById('call-reaction-open-btn').addEventListener('click', e => { e.stopPropagation(); toggleReactionPicker(); });
     document.querySelectorAll('.call-reaction-emoji').forEach(btn => {
-        btn.addEventListener('click', e => {
-            e.stopPropagation();
-            sendCallReaction(btn.dataset.emoji);
-            document.getElementById('call-reaction-picker').classList.remove('visible');
-        });
+        btn.addEventListener('click', e => { e.stopPropagation(); sendCallReaction(btn.dataset.emoji); document.getElementById('call-reaction-picker').classList.remove('visible'); });
     });
     document.addEventListener('click', e => {
-        const picker  = document.getElementById('call-reaction-picker');
-        const trigger = document.getElementById('call-reaction-open-btn');
+        const picker = document.getElementById('call-reaction-picker'), trigger = document.getElementById('call-reaction-open-btn');
         if (picker && !picker.contains(e.target) && e.target !== trigger) picker.classList.remove('visible');
     });
 }
@@ -2266,6 +2187,7 @@ function injectChatInputButtons() {
 window.onload = async () => {
     injectChatInputButtons();
     injectVoiceUI();
+    injectFileUploadUI();
     injectCallUI();
 
     await getUsers();
@@ -2277,8 +2199,7 @@ window.onload = async () => {
 };
 
 window.addEventListener('beforeunload', () => {
-    if (callState !== 'idle' && callPeerUserId && currentCallId) {
+    if (callState !== 'idle' && callPeerUserId && currentCallId)
         sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
-    }
     if (isRecording) cancelVoiceRecording();
 });
