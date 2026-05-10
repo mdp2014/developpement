@@ -538,8 +538,11 @@ function subscribeToTyping() {
         .on('broadcast', { event: 'typing' }, ({ payload }) => {
             if (payload.user_id === currentUserId) return;
             if (payload.is_typing) {
-                const name = users[payload.user_id]?.username || 'L\'utilisateur';
-                typingIndicator.innerHTML = `<span>${name} est en train d'écrire</span><span class="typing-dots"><span></span><span></span><span></span></span>`;
+                const name = users[payload.user_id]?.username || 'U';
+                typingIndicator.innerHTML = `
+                    <div class="typing-avatar">${name.charAt(0).toUpperCase()}</div>
+                    <div class="typing-body"><div class="typing-dots"><span></span><span></span><span></span></div></div>
+                `;
                 typingIndicator.style.display = 'flex';
             } else { typingIndicator.style.display = 'none'; }
         })
@@ -1068,14 +1071,22 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
         fragment.appendChild(el); setLastDate(msgDate);
     }
 
+    const rowEl = document.createElement('div');
+    rowEl.classList.add('message-row', isMine ? 'sent' : 'received');
+
+    if (!isMine) {
+        const avatarEl = document.createElement('div');
+        avatarEl.className = 'message-avatar';
+        avatarEl.textContent = sender.charAt(0).toUpperCase() || '?';
+        avatarEl.title = sender;
+        rowEl.appendChild(avatarEl);
+    }
+
     const msgEl = document.createElement('div');
     msgEl.classList.add('message', isMine ? 'sent' : 'received');
     if (voiceData) msgEl.classList.add('voice-msg');
     if (fileData)  msgEl.classList.add('file-msg');
     msgEl.dataset.msgId = message.id;
-
-    const senderSpan = document.createElement('span');
-    senderSpan.className = 'msg-sender'; senderSpan.textContent = sender;
 
     const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta';
     let metaText = message.city ? `📍 ${message.city} · ${msgTime}` : msgTime;
@@ -1085,7 +1096,6 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     }
     metaSpan.textContent = metaText;
 
-    msgEl.appendChild(senderSpan);
     if (voiceData)    { msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine)); }
     else if (fileData){ msgEl.appendChild(createFileMessageElement(fileData, isMine)); }
     else              { msgEl.appendChild(document.createTextNode(message.content)); }
@@ -1096,7 +1106,9 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
         del.addEventListener('click', () => deleteMessage(message.id, fileData?.path));
         msgEl.appendChild(del);
     }
-    fragment.appendChild(msgEl);
+
+    rowEl.appendChild(msgEl);
+    fragment.appendChild(rowEl);
 }
 
 function appendOptimisticMessage(content) {
@@ -1110,17 +1122,20 @@ function appendOptimisticMessage(content) {
     }
     const voiceData = parseVoiceMessage(content);
     const fileData  = parseFileMessage(content);
+    const rowEl = document.createElement('div');
+    rowEl.classList.add('message-row', 'sent');
+
     const msgEl = document.createElement('div'); msgEl.classList.add('message', 'sent', 'optimistic');
     if (voiceData) msgEl.classList.add('voice-msg');
     if (fileData)  msgEl.classList.add('file-msg');
-    const senderSpan = document.createElement('span'); senderSpan.className = 'msg-sender'; senderSpan.textContent = users[currentUserId]?.username || 'Moi';
     const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta'; metaSpan.textContent = `${msgTime} · ⏳`;
-    msgEl.appendChild(senderSpan);
     if (voiceData)    { msgEl.appendChild(createVoiceMessagePlayer(voiceData, true)); }
     else if (fileData){ msgEl.appendChild(createFileMessageElement(fileData, true)); }
     else              { msgEl.appendChild(document.createTextNode(content)); }
     msgEl.appendChild(metaSpan);
-    chatMessages.appendChild(msgEl);
+
+    rowEl.appendChild(msgEl);
+    chatMessages.appendChild(rowEl);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return msgEl;
 }
