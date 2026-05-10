@@ -998,11 +998,11 @@ function renderMessages(data) {
 }
 
 function appendMessageElement(message) {
-    const last = currentMessages[currentMessages.length - 2];
-    const lastDate = last ? new Date(last.created_at).toLocaleDateString('fr-FR') : null;
-    const fragment = document.createDocumentFragment();
-    appendToFragment(fragment, message, lastDate, () => {});
-    chatMessages.appendChild(fragment);
+const last = currentMessages[currentMessages.length - 2];
+const lastDate = last ? new Date(last.created_at).toLocaleDateString('fr-FR') : null;
+const fragment = document.createDocumentFragment();
+appendToFragment(fragment, message, lastDate, () => {});
+chatMessages.appendChild(fragment);
 }
 
 function appendToFragment(fragment, message, lastDate, setLastDate) {
