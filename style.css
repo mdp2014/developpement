@@ -581,6 +581,74 @@ body::after {
 .chat-messages .message .msg-meta.read      { color: #000; opacity: 0.8; }
 .chat-messages .message .msg-meta.sent-status { opacity: 0.5; }
 
+.file-message-wrap {
+    position: relative;
+    display: inline-grid;
+    gap: 10px;
+    width: min(100%, 380px);
+    max-width: 72vw;
+}
+.file-msg-image,
+.file-msg-video {
+    width: 100%;
+    border-radius: 20px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: #000;
+    display: block;
+    object-fit: cover;
+}
+.file-msg-image { cursor: pointer; }
+.file-msg-video { min-height: 180px; max-height: 360px; }
+.file-msg-generic {
+    display: grid;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.file-msg-icon { font-size: 1.2rem; margin-right: 8px; }
+.file-msg-name {
+    font-weight: 700;
+    color: #fff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.file-msg-size {
+    font-size: 0.82rem;
+    color: rgba(255, 255, 255, 0.7);
+}
+.file-msg-dl {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 14px;
+    border-radius: 16px;
+    background: rgba(110, 231, 183, 0.12);
+    color: #def7ec;
+    border: 1px solid rgba(110, 231, 183, 0.18);
+    text-decoration: none;
+    font-weight: 700;
+}
+.file-msg-dl-btn {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: rgba(110, 231, 183, 0.16);
+    color: #fff;
+    text-decoration: none;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
 .chat-messages .delete-button {
     position: absolute;
     top: -8px; right: -8px;
@@ -1119,9 +1187,46 @@ emoji-picker::part(emoji):hover    { transform: scale(1.3); }
     gap: 28px;
     padding: 40px 32px 36px;
     width: 100%;
-    max-width: 340px;
+    max-width: 920px;
     animation: callScreenIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
+#call-video-area {
+    display: none;
+    width: min(100%, 900px);
+    max-width: 100%;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+    position: relative;
+}
+.call-video-half,
+.call-video-full {
+    border-radius: 22px;
+    background: #000;
+    box-shadow: 0 22px 72px rgba(0, 0, 0, 0.4);
+    width: 100%;
+    max-width: 780px;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+}
+.call-video-half { max-width: 46vw; min-width: 240px; }
+.call-video-full { max-width: 780px; }
+.call-pip-avatar {
+    position: absolute;
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(135deg, #4a6dff, #1ed4ff);
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: 700;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+    z-index: 5;
+}
+#call-local-pip { bottom: 16px; right: 16px; }
+#call-remote-pip { top: 16px; left: 16px; }
 @keyframes callScreenIn {
     from { opacity: 0; transform: translateY(24px) scale(0.96); }
     to   { opacity: 1; transform: translateY(0) scale(1); }
