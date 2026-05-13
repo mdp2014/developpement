@@ -62,10 +62,21 @@ let isTyping         = false;
 
 let onlineUsers      = new Set();
 let usersWithUnread  = new Map();
+let groups           = [];
+let targetMode       = 'direct';
+let groupSelect      = null;
+let targetModeSelect = null;
+let createGroupButton = null;
+let groupCallButton  = null;
+let activeGroupId    = '';
+let groupSchemaErrorShown = false;
 
 const SESSION_KEY    = 'session_v2';
 const SESSION_MS     = 1000 * 60 * 60 * 24 * 30;
 const WELCOME_SESSION_KEY = 'welcome_screen_shown';
+const GROUP_CALL_BASE_URL = 'https://meet.jit.si';
+const GROUPS_TABLE = 'chat_groups';
+const GROUP_MEMBERS_TABLE = 'chat_group_members';
 
 let _geoCache  = null;
 let _geoPend   = null;
@@ -370,6 +381,9 @@ async function restoreSession() {
     showConnectedUI(session.username);
     await requestNotificationPermission();
     await getUsers();
+    await refreshGroupsCache();
+    refreshGroupSelector();
+    refreshTargetModeUI();
     await loadInitialMessages();
     subscribeToConversation();
     subscribeToTyping();
@@ -377,6 +391,122 @@ async function restoreSession() {
     subscribeToIncomingCalls();
     getGeolocationCached().catch(() => {});
     return true;
+}
+
+// ============================================================
+// GROUPES — Gestion via Supabase
+// ============================================================
+function normalizeGroupMembers(memberIds = []) {
+    return [...new Set((memberIds || []).map(v => String(v).trim()).filter(Boolean))];
+}
+
+function isGroupMode() {
+    return targetMode === 'group';
+}
+
+function getVisibleGroups() {
+    return groups;
+}
+
+function getActiveGroup() {
+    if (!isGroupMode() || !groupSelect) return null;
+    const gid = groupSelect.value;
+    if (!gid) return null;
+    return getVisibleGroups().find(g => g.id === gid) || null;
+}
+
+function parseGroupCallPayload(content) {
+    if (!content || !content.startsWith('{')) return null;
+    try {
+        const obj = JSON.parse(content);
+        return obj.type === '__group_call__' && obj.url ? obj : null;
+    } catch {
+        return null;
+    }
+}
+
+function dedupeMessagesForCurrentThread(messages) {
+    if (!isGroupMode()) return messages;
+    const byLogicalId = new Map();
+    for (const msg of messages) {
+        const logicalId = msg.logical_id || msg.id;
+        const existing = byLogicalId.get(logicalId);
+        if (!existing || new Date(msg.created_at).getTime() < new Date(existing.created_at).getTime()) {
+            byLogicalId.set(logicalId, msg);
+        }
+    }
+    return [...byLogicalId.values()].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+}
+
+function isMissingGroupSchemaError(error) {
+    if (!error) return false;
+    const msg = String(error.message || '').toLowerCase();
+    return error.code === '42P01' || error.code === '42703' || msg.includes('does not exist');
+}
+
+function showGroupSchemaErrorOnce(error) {
+    console.error('[Groups] schema issue:', error);
+    if (groupSchemaErrorShown) return;
+    groupSchemaErrorShown = true;
+    alert('Tables groupes manquantes. Exécute le SQL de migration groupes puis recharge la page.');
+}
+
+async function loadGroupsFromDatabase() {
+    if (!currentUserId) return [];
+
+    const { data: memberships, error: membershipsError } = await supabase
+        .from(GROUP_MEMBERS_TABLE)
+        .select('group_id')
+        .eq('user_id', currentUserId);
+
+    if (membershipsError) {
+        if (isMissingGroupSchemaError(membershipsError)) showGroupSchemaErrorOnce(membershipsError);
+        else console.error('loadGroupsFromDatabase memberships:', membershipsError);
+        return [];
+    }
+
+    const groupIds = [...new Set((memberships || []).map(row => row.group_id).filter(Boolean))];
+    if (!groupIds.length) return [];
+
+    const [{ data: groupRows, error: groupRowsError }, { data: memberRows, error: memberRowsError }] = await Promise.all([
+        supabase.from(GROUPS_TABLE).select('id, name, created_by, created_at').in('id', groupIds),
+        supabase.from(GROUP_MEMBERS_TABLE).select('group_id, user_id').in('group_id', groupIds)
+    ]);
+
+    if (groupRowsError || memberRowsError) {
+        const err = groupRowsError || memberRowsError;
+        if (isMissingGroupSchemaError(err)) showGroupSchemaErrorOnce(err);
+        else console.error('loadGroupsFromDatabase rows:', err);
+        return [];
+    }
+
+    const membersByGroup = new Map();
+    (memberRows || []).forEach(row => {
+        const gid = String(row.group_id);
+        if (!membersByGroup.has(gid)) membersByGroup.set(gid, []);
+        membersByGroup.get(gid).push(String(row.user_id));
+    });
+
+    return (groupRows || [])
+        .map(row => ({
+            id: String(row.id),
+            name: String(row.name || 'Groupe').trim().slice(0, 60) || 'Groupe',
+            members: normalizeGroupMembers(membersByGroup.get(String(row.id)) || []),
+            createdBy: row.created_by ? String(row.created_by) : null,
+            createdAt: row.created_at || null
+        }))
+        .filter(g => g.members.includes(String(currentUserId)))
+        .sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }));
+}
+
+async function refreshGroupsCache() {
+    groups = await loadGroupsFromDatabase();
+    return groups;
+}
+
+function buildGroupCallUrl(group) {
+    const slug = `${group.name}-${group.id}`.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || group.id;
+    return `${GROUP_CALL_BASE_URL}/${slug}-${Date.now().toString(36)}#config.prejoinConfig.enabled=true`;
 }
 
 // ============================================================
@@ -405,7 +535,12 @@ function subscribeToPresence() {
 async function fetchUnreadByUser() {
     if (!currentUserId) return;
     try {
-        const { data, error } = await supabase.from('messages').select('id_sent').eq('id_received', currentUserId).is('read_at', null);
+        const { data, error } = await supabase
+            .from('messages')
+            .select('id_sent')
+            .eq('id_received', currentUserId)
+            .is('group_id', null)
+            .is('read_at', null);
         if (error) return;
         const map = new Map();
         data.forEach(msg => { if (msg.id_sent !== userSelect.value) map.set(msg.id_sent, (map.get(msg.id_sent) || 0) + 1); });
@@ -424,7 +559,7 @@ function updatePresenceUI() {
     if (wrapper) {
         wrapper.querySelectorAll('.status-pill').forEach(el => el.remove());
         const selId = userSelect.value;
-        if (selId) {
+        if (!isGroupMode() && selId) {
             const pill = document.createElement('span');
             pill.className = 'status-pill';
             if (usersWithUnread.has(selId)) {
@@ -446,6 +581,7 @@ function updatePresenceUI() {
         userSelect.insertAdjacentElement('beforebegin', badge);
     }
     updateCallButtonState();
+    updateGroupCallButtonState();
 }
 
 function clearPresenceUI() {
@@ -454,24 +590,170 @@ function clearPresenceUI() {
     onlineUsers = new Set(); usersWithUnread = new Map();
 }
 
+function refreshGroupSelector() {
+    if (!groupSelect) return;
+    const visibleGroups = getVisibleGroups();
+    const prev = groupSelect.value;
+    groupSelect.innerHTML = '';
+    visibleGroups.forEach(group => {
+        const opt = document.createElement('option');
+        opt.value = group.id;
+        const others = group.members.filter(m => m !== String(currentUserId)).length;
+        opt.textContent = `${group.name} (${others + 1})`;
+        groupSelect.appendChild(opt);
+    });
+    if (visibleGroups.find(g => g.id === prev)) groupSelect.value = prev;
+    else groupSelect.value = visibleGroups[0]?.id || '';
+    activeGroupId = groupSelect.value || '';
+    updateGroupCallButtonState();
+}
+
+function refreshTargetModeUI() {
+    if (!targetModeSelect || !groupSelect || !userSelect) return;
+    if (targetMode === 'group' && !groupSelect.value) {
+        targetMode = 'direct';
+        targetModeSelect.value = 'direct';
+    }
+    const groupMode = isGroupMode();
+    userSelect.style.display = groupMode ? 'none' : '';
+    groupSelect.style.display = groupMode ? '' : 'none';
+    if (createGroupButton) createGroupButton.style.display = currentUserId ? 'inline-flex' : 'none';
+    updateCallButtonState();
+    updateGroupCallButtonState();
+}
+
+function updateGroupCallButtonState() {
+    if (!groupCallButton) return;
+    const group = getActiveGroup();
+    const canCall = !!(currentUserId && isGroupMode() && group && group.members.filter(m => m !== String(currentUserId)).length > 0);
+    groupCallButton.style.display = canCall ? 'flex' : 'none';
+}
+
+function hasActiveTarget() {
+    if (!currentUserId) return false;
+    if (isGroupMode()) return !!getActiveGroup();
+    return !!userSelect.value;
+}
+
+function switchTargetMode(nextMode) {
+    targetMode = nextMode === 'group' ? 'group' : 'direct';
+    if (targetModeSelect) targetModeSelect.value = targetMode;
+    activeGroupId = isGroupMode() ? (groupSelect?.value || '') : '';
+    refreshTargetModeUI();
+    currentMessages = [];
+    typingIndicator.style.display = 'none';
+    quickReplies.style.display = 'none';
+    isTyping = false;
+    clearTimeout(typingTimeout);
+    if (currentUserId) {
+        subscribeToConversation();
+        subscribeToTyping();
+        loadInitialMessages().then(() => updatePresenceUI());
+    }
+}
+
+async function createGroupFlow() {
+    if (!currentUserId) { alert('Connectez-vous pour créer un groupe.'); return; }
+    const groupNameRaw = prompt('Nom du groupe :');
+    if (!groupNameRaw) return;
+    const groupName = groupNameRaw.trim().slice(0, 60);
+    if (!groupName) { alert('Nom de groupe invalide.'); return; }
+
+    const selectable = Object.values(users).filter(u => String(u.id) !== String(currentUserId));
+    if (!selectable.length) { alert('Aucun utilisateur disponible pour ce groupe.'); return; }
+
+    const choices = selectable.map((u, i) => `${i + 1}. ${u.username}`).join('\n');
+    const answer = prompt(`Choisis les membres (numéros séparés par des virgules) :\n${choices}`);
+    if (!answer) return;
+
+    const pickedIndexes = [...new Set(
+        answer.split(',').map(v => Number.parseInt(v.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= selectable.length)
+    )];
+    if (!pickedIndexes.length) { alert('Aucun membre valide sélectionné.'); return; }
+
+    const memberIds = normalizeGroupMembers([String(currentUserId), ...pickedIndexes.map(idx => String(selectable[idx - 1].id))]);
+    const { data: createdGroup, error: createGroupError } = await supabase
+        .from(GROUPS_TABLE)
+        .insert({ name: groupName, created_by: currentUserId })
+        .select('id, name, created_by, created_at')
+        .single();
+    if (createGroupError || !createdGroup) {
+        if (isMissingGroupSchemaError(createGroupError)) showGroupSchemaErrorOnce(createGroupError);
+        else console.error('createGroupFlow group:', createGroupError);
+        alert('Impossible de créer le groupe.');
+        return;
+    }
+
+    const memberRows = memberIds.map(uid => ({ group_id: createdGroup.id, user_id: uid }));
+    const { error: membersError } = await supabase.from(GROUP_MEMBERS_TABLE).insert(memberRows);
+    if (membersError) {
+        console.error('createGroupFlow members:', membersError);
+        await supabase.from(GROUPS_TABLE).delete().eq('id', createdGroup.id).catch(() => {});
+        alert('Impossible d\'ajouter les membres au groupe.');
+        return;
+    }
+
+    await refreshGroupsCache();
+    refreshGroupSelector();
+    switchTargetMode('group');
+    if (groupSelect) groupSelect.value = String(createdGroup.id);
+    activeGroupId = String(createdGroup.id);
+    await loadInitialMessages();
+    showNotification('Groupe créé', `${createdGroup.name} est prêt ✅`);
+}
+
+async function startGroupCall() {
+    const group = getActiveGroup();
+    if (!group) { alert('Sélectionnez un groupe.'); return; }
+    const roomUrl = buildGroupCallUrl(group);
+    const payload = JSON.stringify({
+        type: '__group_call__',
+        url: roomUrl,
+        label: `Appel de groupe - ${group.name}`
+    });
+    await sendMessage(currentUserId, payload);
+    window.open(roomUrl, '_blank', 'noopener,noreferrer');
+}
+
 // ============================================================
 // MESSAGES — Chargement initial
 // ============================================================
 async function loadInitialMessages() {
-    if (!currentUserId || !userSelect.value) { chatMessages.innerHTML = ''; currentMessages = []; return; }
-    const uid  = currentUserId, peer = userSelect.value;
-    const { data, error } = await supabase.from('messages')
-        .select('id, id_sent, id_received, content, created_at, read_at, city')
-        .or(`and(id_sent.eq.${uid},id_received.eq.${peer}),and(id_sent.eq.${peer},id_received.eq.${uid})`)
-        .order('created_at', { ascending: true });
-    if (error) { console.error('loadInitialMessages:', error); return; }
-    currentMessages = data;
-    renderMessages(data);
+    if (!currentUserId || !hasActiveTarget()) { chatMessages.innerHTML = ''; currentMessages = []; return; }
+
+    if (isGroupMode()) {
+        const group = getActiveGroup();
+        if (!group) { chatMessages.innerHTML = ''; currentMessages = []; return; }
+        const uid = String(currentUserId);
+        const { data, error } = await supabase.from('messages')
+            .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, logical_id, message_type')
+            .eq('group_id', group.id)
+            .or(`id_received.eq.${uid},id_sent.eq.${uid}`)
+            .order('created_at', { ascending: true });
+        if (error) {
+            if (isMissingGroupSchemaError(error)) showGroupSchemaErrorOnce(error);
+            else console.error('loadInitialMessages(group):', error);
+            return;
+        }
+        currentMessages = dedupeMessagesForCurrentThread(data || []);
+    } else {
+        const uid = currentUserId;
+        const peer = userSelect.value;
+        const { data, error } = await supabase.from('messages')
+            .select('id, id_sent, id_received, content, created_at, read_at, city, group_id')
+            .or(`and(id_sent.eq.${uid},id_received.eq.${peer}),and(id_sent.eq.${peer},id_received.eq.${uid})`)
+            .is('group_id', null)
+            .order('created_at', { ascending: true });
+        if (error) { console.error('loadInitialMessages:', error); return; }
+        currentMessages = data || [];
+    }
+
+    renderMessages(currentMessages);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     await markMessagesAsRead();
     await fetchUnreadByUser();
     updatePresenceUI();
-    if (data.length > 0) generateQuickReplies(data[data.length - 1]);
+    if (currentMessages.length > 0) generateQuickReplies(currentMessages[currentMessages.length - 1]);
 }
 
 // ============================================================
@@ -479,35 +761,96 @@ async function loadInitialMessages() {
 // ============================================================
 function subscribeToConversation() {
     if (msgChannel) { supabase.removeChannel(msgChannel); msgChannel = null; }
-    if (!currentUserId || !userSelect.value) return;
-    const uid = currentUserId, peer = userSelect.value;
-    msgChannel = supabase.channel(`conv-${uid}-${peer}`)
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
+    if (!currentUserId || !hasActiveTarget()) return;
+    const uid = String(currentUserId);
+    const peer = String(userSelect.value || '');
+    const activeGroup = getActiveGroup();
+    const channelKey = isGroupMode() ? `group-${activeGroup?.id || 'none'}` : `direct-${peer || 'none'}`;
+    msgChannel = supabase.channel(`conv-${uid}-${channelKey}`)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `id_received=eq.${uid}` }, async (payload) => {
             const msg = payload.new;
-            const isOurConv = (msg.id_sent === uid && msg.id_received === peer) || (msg.id_sent === peer && msg.id_received === uid);
-            if (!isOurConv) {
-                if (msg.id_received === uid) { usersWithUnread.set(msg.id_sent, (usersWithUnread.get(msg.id_sent) || 0) + 1); updatePresenceUI(); }
+            if (!isGroupMode()) {
+                if (msg.group_id) {
+                    if (!groups.some(g => String(g.id) === String(msg.group_id))) {
+                        await refreshGroupsCache();
+                        refreshGroupSelector();
+                    }
+                    const group = groups.find(g => String(g.id) === String(msg.group_id));
+                    if (document.hidden && String(msg.id_sent) !== uid) {
+                        const groupCall = parseGroupCallPayload(msg.content);
+                        const voiceData = parseVoiceMessage(msg.content);
+                        const fileData = parseFileMessage(msg.content);
+                        const preview = groupCall
+                            ? `📞 ${groupCall.label || 'Appel de groupe'}`
+                            : voiceData ? '🎙️ Message vocal' : fileData ? `📎 ${fileData.name}` : msg.content.substring(0, 60);
+                        showNotification(`Nouveau message dans ${group?.name || 'un groupe'}`, preview);
+                    }
+                    return;
+                }
+                const isOurConv = String(msg.id_sent) === String(peer) && String(msg.id_received) === uid;
+                if (!isOurConv) {
+                    usersWithUnread.set(msg.id_sent, (usersWithUnread.get(msg.id_sent) || 0) + 1);
+                    updatePresenceUI();
+                    return;
+                }
+                if (currentMessages.find(m => m.id === msg.id)) return;
+                const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 60;
+                currentMessages.push(msg);
+                appendMessageElement(msg);
+                if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
+                if (document.hidden && String(msg.id_sent) === String(peer)) {
+                    const voiceData = parseVoiceMessage(msg.content);
+                    const fileData = parseFileMessage(msg.content);
+                    const preview = voiceData ? '🎙️ Message vocal' : fileData ? `📎 ${fileData.name}` : msg.content.substring(0, 60);
+                    showNotification(`Nouveau message de ${users[msg.id_sent]?.username || '?'}`, preview);
+                }
+                if (String(msg.id_received) === uid) { await markMessagesAsRead(); await fetchUnreadByUser(); updatePresenceUI(); }
                 return;
             }
-            if (currentMessages.find(m => m.id === msg.id)) return;
+
+            const group = getActiveGroup();
+            if (!group || !msg.group_id || String(msg.group_id) !== String(group.id)) return;
+
+            const logicalMsg = {
+                ...msg,
+                logical_id: msg.logical_id || msg.id,
+                group_id: msg.group_id
+            };
+            const exists = currentMessages.find(m => (m.logical_id && m.logical_id === logicalMsg.logical_id) || m.id === logicalMsg.id);
+            if (exists) return;
             const wasAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 60;
-            currentMessages.push(msg);
-            appendMessageElement(msg);
+            currentMessages.push(logicalMsg);
+            appendMessageElement(logicalMsg);
             if (wasAtBottom) chatMessages.scrollTop = chatMessages.scrollHeight;
-            if (document.hidden && msg.id_sent === peer) {
-                const voiceData = parseVoiceMessage(msg.content);
-                const fileData = parseFileMessage(msg.content);
-                const preview = voiceData ? '🎙️ Message vocal' : fileData ? `📎 ${fileData.name}` : msg.content.substring(0, 60);
-                showNotification(`Nouveau message de ${users[msg.id_sent]?.username || '?'}`, preview);
+            if (document.hidden && String(msg.id_sent) !== uid) {
+                const groupCall = parseGroupCallPayload(logicalMsg.content);
+                const voiceData = parseVoiceMessage(logicalMsg.content);
+                const fileData = parseFileMessage(logicalMsg.content);
+                const preview = groupCall
+                    ? `📞 ${groupCall.label || 'Appel de groupe'}`
+                    : voiceData ? '🎙️ Message vocal' : fileData ? `📎 ${fileData.name}` : logicalMsg.content.substring(0, 60);
+                showNotification(`Nouveau message dans ${group.name}`, preview);
             }
-            if (msg.id_received === uid) { await markMessagesAsRead(); await fetchUnreadByUser(); updatePresenceUI(); }
+            if (String(msg.id_received) === uid) await markMessagesAsRead();
         })
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `id_sent=eq.${uid}` }, (payload) => {
             const updated = payload.new;
-            const isOurConv = (updated.id_sent === uid && updated.id_received === peer) || (updated.id_sent === peer && updated.id_received === uid);
-            if (!isOurConv) return;
-            const idx = currentMessages.findIndex(m => m.id === updated.id);
-            if (idx !== -1) { currentMessages[idx] = { ...currentMessages[idx], ...updated }; updateMessageReadStatus(updated.id, updated.read_at); }
+            if (!isGroupMode()) {
+                if (updated.group_id) return;
+                const isOurConv = String(updated.id_sent) === uid && String(updated.id_received) === String(peer);
+                if (!isOurConv) return;
+                const idx = currentMessages.findIndex(m => m.id === updated.id);
+                if (idx !== -1) { currentMessages[idx] = { ...currentMessages[idx], ...updated }; updateMessageReadStatus(updated.id, updated.read_at); }
+                return;
+            }
+            const group = getActiveGroup();
+            if (!group || !updated.group_id || String(updated.group_id) !== String(group.id)) return;
+            const logicalId = updated.logical_id || updated.id;
+            const idx = currentMessages.findIndex(m => (m.logical_id && m.logical_id === logicalId) || m.id === updated.id);
+            if (idx !== -1) {
+                currentMessages[idx] = { ...currentMessages[idx], ...updated, logical_id: logicalId, group_id: updated.group_id };
+                updateMessageReadStatus(currentMessages[idx].id, updated.read_at);
+            }
         })
         .subscribe((status, err) => { if (err) console.error('subscribeToConversation error:', err); });
 }
@@ -532,7 +875,7 @@ function updateMessageReadStatus(msgId, readAt) {
 // ============================================================
 function subscribeToTyping() {
     if (typingChannel) { supabase.removeChannel(typingChannel); typingChannel = null; }
-    if (!currentUserId || !userSelect.value) return;
+    if (!currentUserId || !userSelect.value || isGroupMode()) return;
     const channelName = `typing:${[currentUserId, userSelect.value].sort().join(':')}`;
     typingChannel = supabase.channel(channelName)
         .on('broadcast', { event: 'typing' }, ({ payload }) => {
@@ -550,7 +893,7 @@ function subscribeToTyping() {
 }
 
 async function broadcastTyping(isTypingNow) {
-    if (!typingChannel || !currentUserId) return;
+    if (!typingChannel || !currentUserId || isGroupMode()) return;
     try {
         await typingChannel.send({ type: 'broadcast', event: 'typing', payload: { user_id: currentUserId, is_typing: isTypingNow } });
     } catch {}
@@ -669,6 +1012,10 @@ async function getUsers() {
         opt.value = user.id; opt.textContent = user.username;
         userSelect.appendChild(opt);
     });
+    const firstPeer = Array.from(userSelect.options).find(opt => String(opt.value) !== String(currentUserId));
+    if (firstPeer) userSelect.value = firstPeer.value;
+    refreshGroupSelector();
+    refreshTargetModeUI();
     if (currentUserId) updatePresenceUI();
 }
 
@@ -676,10 +1023,31 @@ async function getUsers() {
 // ACCUSÉS DE LECTURE
 // ============================================================
 async function markMessagesAsRead() {
-    if (!currentUserId || !userSelect.value) return;
+    if (!currentUserId || !hasActiveTarget()) return;
     try {
-        await supabase.from('messages').update({ read_at: new Date().toISOString() })
-            .eq('id_sent', userSelect.value).eq('id_received', currentUserId).is('read_at', null);
+        const nowIso = new Date().toISOString();
+        if (isGroupMode()) {
+            const group = getActiveGroup();
+            if (!group) return;
+            const { data, error } = await supabase.from('messages')
+                .select('id')
+                .eq('id_received', currentUserId)
+                .eq('group_id', group.id)
+                .is('read_at', null);
+            if (error || !data?.length) return;
+            const ids = data.map(msg => msg.id);
+            if (ids.length) await supabase.from('messages').update({ read_at: nowIso }).in('id', ids);
+            return;
+        }
+        const { data, error } = await supabase.from('messages')
+            .select('id')
+            .eq('id_sent', userSelect.value)
+            .eq('id_received', currentUserId)
+            .is('group_id', null)
+            .is('read_at', null);
+        if (error || !data?.length) return;
+        const ids = data.map(msg => msg.id);
+        if (ids.length) await supabase.from('messages').update({ read_at: nowIso }).in('id', ids);
     } catch (e) { console.error('markMessagesAsRead:', e); }
 }
 
@@ -689,7 +1057,7 @@ async function markMessagesAsRead() {
 function generateQuickReplies(lastMessage) {
     if (!lastMessage || lastMessage.id_sent === currentUserId) { quickReplies.style.display = 'none'; return; }
     const content = lastMessage.content.toLowerCase().trim();
-    if (content.startsWith('{"type":"__voice__"') || content.startsWith('{"type":"__file__"') || content.length < 3) { quickReplies.style.display = 'none'; return; }
+    if (content.startsWith('{"type":"__voice__"') || content.startsWith('{"type":"__file__"') || content.startsWith('{"type":"__group_call__"') || content.length < 3) { quickReplies.style.display = 'none'; return; }
     const patterns = {
         greeting:     { kw: ['bonjour','salut','hello','coucou','bonsoir'],        r: ['👋 Bonjour !','Salut !','Hello !','Ça va ?'] },
         thanks:       { kw: ['merci','thanks','thx'],                              r: ['De rien !','Avec plaisir !','😊','Pas de souci !'] },
@@ -805,7 +1173,7 @@ function isVideoMime(mime) {
  * Upload un fichier vers Supabase Storage et envoie le message
  */
 async function handleFileUpload(file) {
-    if (!currentUserId || !userSelect.value) { alert('Connectez-vous pour envoyer des fichiers.'); return; }
+    if (!currentUserId || !hasActiveTarget()) { alert('Connectez-vous pour envoyer des fichiers.'); return; }
     if (file.size > MAX_FILE_SIZE) { alert(`Fichier trop volumineux. Maximum : ${MAX_FILE_SIZE / 1024 / 1024} MB`); return; }
 
     const allowedMimes = ['image/jpeg','image/png','image/gif','image/webp','image/heic','image/heif','video/mp4','video/webm','video/quicktime','video/3gpp'];
@@ -978,6 +1346,23 @@ function parseVoiceMessage(content) {
     return null;
 }
 
+function createGroupCallMessageElement(callData) {
+    const wrap = document.createElement('div');
+    wrap.className = 'group-call-message';
+    const title = document.createElement('div');
+    title.className = 'group-call-title';
+    title.textContent = callData.label || 'Appel de groupe';
+    const link = document.createElement('a');
+    link.className = 'group-call-link';
+    link.href = callData.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Rejoindre l\'appel';
+    wrap.appendChild(title);
+    wrap.appendChild(link);
+    return wrap;
+}
+
 function formatVoiceDuration(seconds) {
     const s = Math.round(Math.max(0, seconds));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -1065,6 +1450,7 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     const sender   = users[message.id_sent]?.username || 'Inconnu';
     const voiceData = parseVoiceMessage(message.content);
     const fileData  = parseFileMessage(message.content);
+    const groupCallData = parseGroupCallPayload(message.content);
 
     if (msgDate !== lastDate) {
         const el = document.createElement('div'); el.className = 'date'; el.textContent = msgDate;
@@ -1086,6 +1472,7 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     msgEl.classList.add('message', isMine ? 'sent' : 'received');
     if (voiceData) msgEl.classList.add('voice-msg');
     if (fileData)  msgEl.classList.add('file-msg');
+    if (groupCallData) msgEl.classList.add('group-call-msg');
     msgEl.dataset.msgId = message.id;
 
     const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta';
@@ -1096,9 +1483,10 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     }
     metaSpan.textContent = metaText;
 
-    if (voiceData)    { msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine)); }
-    else if (fileData){ msgEl.appendChild(createFileMessageElement(fileData, isMine)); }
-    else              { msgEl.appendChild(document.createTextNode(message.content)); }
+    if (voiceData)         { msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine)); }
+    else if (fileData)     { msgEl.appendChild(createFileMessageElement(fileData, isMine)); }
+    else if (groupCallData){ msgEl.appendChild(createGroupCallMessageElement(groupCallData)); }
+    else                   { msgEl.appendChild(document.createTextNode(message.content)); }
     msgEl.appendChild(metaSpan);
 
     if (isMine) {
@@ -1122,16 +1510,19 @@ function appendOptimisticMessage(content) {
     }
     const voiceData = parseVoiceMessage(content);
     const fileData  = parseFileMessage(content);
+    const groupCallData = parseGroupCallPayload(content);
     const rowEl = document.createElement('div');
     rowEl.classList.add('message-row', 'sent');
 
     const msgEl = document.createElement('div'); msgEl.classList.add('message', 'sent', 'optimistic');
     if (voiceData) msgEl.classList.add('voice-msg');
     if (fileData)  msgEl.classList.add('file-msg');
+    if (groupCallData) msgEl.classList.add('group-call-msg');
     const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta'; metaSpan.textContent = `${msgTime} · ⏳`;
-    if (voiceData)    { msgEl.appendChild(createVoiceMessagePlayer(voiceData, true)); }
-    else if (fileData){ msgEl.appendChild(createFileMessageElement(fileData, true)); }
-    else              { msgEl.appendChild(document.createTextNode(content)); }
+    if (voiceData)         { msgEl.appendChild(createVoiceMessagePlayer(voiceData, true)); }
+    else if (fileData)     { msgEl.appendChild(createFileMessageElement(fileData, true)); }
+    else if (groupCallData){ msgEl.appendChild(createGroupCallMessageElement(groupCallData)); }
+    else                   { msgEl.appendChild(document.createTextNode(content)); }
     msgEl.appendChild(metaSpan);
 
     rowEl.appendChild(msgEl);
@@ -1144,47 +1535,125 @@ function appendOptimisticMessage(content) {
 // ENVOI DE MESSAGES
 // ============================================================
 async function deleteMessage(messageId, filePath) {
+    const messageRef = currentMessages.find(m => m.id === messageId);
     // Supprimer le fichier du storage si présent
     if (filePath) {
         await supabase.storage.from(FILE_BUCKET).remove([filePath]).catch(e => console.warn('deleteFile:', e));
     }
-    const { error } = await supabase.from('messages').delete().eq('id', messageId);
+    let error = null;
+    if (messageRef?.logical_id && messageRef?.group_id && currentUserId) {
+        const { data: linkedRows } = await supabase.from('messages')
+            .select('id')
+            .eq('id_sent', currentUserId)
+            .eq('group_id', messageRef.group_id)
+            .eq('logical_id', messageRef.logical_id);
+        const ids = (linkedRows || []).map(r => r.id);
+        if (ids.length > 0) ({ error } = await supabase.from('messages').delete().in('id', ids));
+        else ({ error } = await supabase.from('messages').delete().eq('id', messageId));
+    } else {
+        ({ error } = await supabase.from('messages').delete().eq('id', messageId));
+    }
     if (error) { console.error('deleteMessage:', error); return; }
     const el = chatMessages.querySelector(`[data-msg-id="${messageId}"]`);
     if (el) el.remove();
-    currentMessages = currentMessages.filter(m => m.id !== messageId);
+    if (messageRef?.logical_id) currentMessages = currentMessages.filter(m => m.logical_id !== messageRef.logical_id);
+    else currentMessages = currentMessages.filter(m => m.id !== messageId);
 }
 
 async function sendMessage(userId, content) {
     const isVoice = content.startsWith('{"type":"__voice__"');
     const isFile  = content.startsWith('{"type":"__file__"');
+    const isGroupCall = content.startsWith('{"type":"__group_call__"');
     let optimisticEl = null;
     if (!isVoice) optimisticEl = appendOptimisticMessage(content);
     isTyping = false; clearTimeout(typingTimeout); broadcastTyping(false);
-    const { data, error } = await supabase.from('messages')
-        .insert({ id_sent: userId, content, created_at: new Date().toISOString(), id_received: userSelect.value, read_at: null, latitude: null, longitude: null, city: null })
-        .select('id, id_sent, id_received, content, created_at, read_at, city').single();
-    if (error) { console.error('sendMessage:', error); optimisticEl?.remove(); return false; }
-    if (optimisticEl) {
-        optimisticEl.remove();
-        if (!currentMessages.find(m => m.id === data.id)) {
-            currentMessages.push(data); appendMessageElement(data); chatMessages.scrollTop = chatMessages.scrollHeight;
+    const createdAt = new Date().toISOString();
+
+    if (!isGroupMode()) {
+        const { data, error } = await supabase.from('messages')
+            .insert({
+                id_sent: userId,
+                content,
+                created_at: createdAt,
+                id_received: userSelect.value,
+                read_at: null,
+                latitude: null,
+                longitude: null,
+                city: null,
+                group_id: null,
+                logical_id: null,
+                message_type: 'direct'
+            })
+            .select('id, id_sent, id_received, content, created_at, read_at, city').single();
+        if (error) { console.error('sendMessage:', error); optimisticEl?.remove(); return false; }
+        if (optimisticEl) {
+            optimisticEl.remove();
+            if (!currentMessages.find(m => m.id === data.id)) {
+                currentMessages.push(data); appendMessageElement(data); chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
         }
+        if (data.id && !isFile && !isGroupCall) {
+            getGeolocationCached().then(async geo => {
+                const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
+                if (!city && !geo.latitude) return;
+                await supabase.from('messages').update({ latitude: geo.latitude, longitude: geo.longitude, city }).eq('id', data.id);
+                const idx = currentMessages.findIndex(m => m.id === data.id);
+                if (idx !== -1) currentMessages[idx].city = city;
+            }).catch(() => {});
+        }
+        return true;
     }
-    if (data.id && !isFile) {
-        getGeolocationCached().then(async geo => {
-            const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
-            if (!city && !geo.latitude) return;
-            await supabase.from('messages').update({ latitude: geo.latitude, longitude: geo.longitude, city }).eq('id', data.id);
-            const idx = currentMessages.findIndex(m => m.id === data.id);
-            if (idx !== -1) currentMessages[idx].city = city;
-        }).catch(() => {});
+
+    const group = getActiveGroup();
+    if (!group) { optimisticEl?.remove(); alert('Groupe introuvable.'); return false; }
+    const recipients = group.members.filter(m => m !== String(currentUserId));
+    if (!recipients.length) { optimisticEl?.remove(); alert('Ajoutez au moins un autre membre au groupe.'); return false; }
+
+    const logicalId = crypto.randomUUID();
+    const rows = recipients.map(recipientId => ({
+        id_sent: userId,
+        id_received: recipientId,
+        content,
+        created_at: createdAt,
+        read_at: null,
+        latitude: null,
+        longitude: null,
+        city: null,
+        group_id: group.id,
+        logical_id: logicalId,
+        message_type: isGroupCall ? 'group_call' : 'group'
+    }));
+    const { data, error } = await supabase.from('messages')
+        .insert(rows)
+        .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, logical_id, message_type');
+    if (error) { console.error('sendMessage(group):', error); optimisticEl?.remove(); return false; }
+
+    const inserted = (data && data.length > 0 ? data[0] : null);
+    const logicalMessage = {
+        id: inserted?.id || `local-${logicalId}`,
+        id_sent: userId,
+        id_received: inserted?.id_received || recipients[0],
+        content,
+        created_at: inserted?.created_at || createdAt,
+        read_at: inserted?.read_at || null,
+        city: inserted?.city || null,
+        logical_id: logicalId,
+        group_id: group.id,
+        message_type: isGroupCall ? 'group_call' : 'group'
+    };
+
+    if (optimisticEl) optimisticEl.remove();
+    if (!currentMessages.find(m => (m.logical_id && m.logical_id === logicalId) || m.id === logicalMessage.id)) {
+        currentMessages.push(logicalMessage);
+        appendMessageElement(logicalMessage);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
     return true;
 }
 
 async function handleSend() {
     if (!currentUserId) { alert('Veuillez vous connecter pour envoyer un message'); return; }
+    if (!hasActiveTarget()) { alert('Sélectionnez une conversation avant d\'envoyer un message.'); return; }
     const content = messageInput.value.trim(); if (!content) return;
     messageInput.value = ''; messageInput.focus(); quickReplies.style.display = 'none';
     rawInputText = ''; prevConvertedValue = '';
@@ -1206,7 +1675,11 @@ async function completeLogin(user, plainPassword) {
     currentUserId = user.id; users[user.id] = { id: user.id, username: user.username };
     showConnectedUI(user.username);
     saveSession({ userId: user.id, username: user.username, plainPassword, issuedAt: Date.now(), expiresAt: Date.now() + SESSION_MS });
-    await getUsers(); await loadInitialMessages();
+    await getUsers();
+    await refreshGroupsCache();
+    refreshGroupSelector();
+    refreshTargetModeUI();
+    await loadInitialMessages();
     subscribeToConversation(); subscribeToTyping(); subscribeToPresence(); subscribeToIncomingCalls();
     getGeolocationCached().catch(() => {});
 }
@@ -1250,9 +1723,14 @@ async function logout(options = {}) {
     msgChannel = typingChannel = presenceChannel = incomingCallChannel = null;
     closeEmojiPicker(); closeFontPicker(); resetFont();
     currentUserId = null; currentMessages = []; _geoCache = null; _geoPend = null;
+    groups = [];
+    targetMode = 'direct'; activeGroupId = '';
+    if (targetModeSelect) targetModeSelect.value = 'direct';
     clearSession(); clearPresenceUI();
     loginContainer.style.display = 'block'; connectedUser.style.display = 'none';
     chatMessages.innerHTML = ''; typingIndicator.style.display = 'none'; quickReplies.style.display = 'none';
+    refreshGroupSelector();
+    refreshTargetModeUI();
     if (reason) alert(reason);
 }
 
@@ -1261,6 +1739,7 @@ logoutButton.addEventListener('click', () => logout());
 loginPassword.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); login(); } });
 
 userSelect.addEventListener('change', async () => {
+    if (isGroupMode()) return;
     currentMessages = []; typingIndicator.style.display = 'none'; quickReplies.style.display = 'none';
     isTyping = false; clearTimeout(typingTimeout);
     if (currentUserId) { subscribeToConversation(); subscribeToTyping(); await loadInitialMessages(); updatePresenceUI(); }
@@ -1444,7 +1923,7 @@ async function processAndSendVoice(blob, mimeType, durationSeconds) {
     const chunkSize = 8192;
     for (let i = 0; i < uint8.length; i += chunkSize) { base64 += String.fromCharCode(...uint8.subarray(i, i + chunkSize)); }
     const dataUrl = `data:${processedBlob.type || mimeType};base64,${btoa(base64)}`;
-    if (!currentUserId || !userSelect.value) { alert('Connectez-vous pour envoyer un message vocal.'); return; }
+    if (!currentUserId || !hasActiveTarget()) { alert('Connectez-vous pour envoyer un message vocal.'); return; }
     const voicePayload = JSON.stringify({ type: '__voice__', data: dataUrl, mime: mimeType, duration: durationSeconds, effect: voiceEffect });
     await sendMessage(currentUserId, voicePayload);
 }
@@ -1838,6 +2317,7 @@ function hideCallScreen() {
 // ============================================================
 function updateCallButtonState() {
     const btn = document.getElementById('call-audio-btn'); if (!btn) return;
+    if (isGroupMode()) { btn.style.display = 'none'; return; }
     const selId = userSelect.value;
     const peerIsOnline = onlineUsers.has(selId);
     btn.style.display = (currentUserId && selId && selId !== String(currentUserId) && peerIsOnline) ? 'flex' : 'none';
@@ -1975,7 +2455,7 @@ function buildPeerConnection() {
 }
 
 async function initiateCall() {
-    if (!currentUserId || !userSelect.value || callState !== 'idle') return;
+    if (!currentUserId || !userSelect.value || callState !== 'idle' || isGroupMode()) return;
     const calleeId = userSelect.value;
     if (String(calleeId) === String(currentUserId)) return;
     callState = 'calling'; callPeerUserId = calleeId; callReconnectAttempts = 0;
@@ -2103,6 +2583,55 @@ function updateSpeakerButton() {
 }
 
 // ============================================================
+// GROUPES — Injection UI
+// ============================================================
+function injectGroupUI() {
+    const userSelectionEl = document.querySelector('.user-selection');
+    if (!userSelectionEl || targetModeSelect || groupSelect) return;
+
+    targetModeSelect = document.createElement('select');
+    targetModeSelect.id = 'target-mode-select';
+    targetModeSelect.className = 'target-mode-select';
+    targetModeSelect.innerHTML = `
+        <option value="direct">Privé</option>
+        <option value="group">Groupe</option>
+    `;
+    targetModeSelect.value = targetMode;
+    targetModeSelect.addEventListener('change', () => switchTargetMode(targetModeSelect.value));
+
+    groupSelect = document.createElement('select');
+    groupSelect.id = 'group-select';
+    groupSelect.className = 'group-select';
+    groupSelect.style.display = 'none';
+    groupSelect.addEventListener('change', async () => {
+        activeGroupId = groupSelect.value || '';
+        currentMessages = [];
+        typingIndicator.style.display = 'none';
+        quickReplies.style.display = 'none';
+        if (currentUserId) {
+            subscribeToConversation();
+            await loadInitialMessages();
+            updateGroupCallButtonState();
+        }
+    });
+
+    createGroupButton = document.createElement('button');
+    createGroupButton.id = 'create-group-btn';
+    createGroupButton.className = 'icon-button create-group-btn';
+    createGroupButton.type = 'button';
+    createGroupButton.title = 'Créer un groupe';
+    createGroupButton.textContent = '＋';
+    createGroupButton.addEventListener('click', createGroupFlow);
+
+    userSelect.insertAdjacentElement('beforebegin', targetModeSelect);
+    userSelect.insertAdjacentElement('afterend', groupSelect);
+    userSelectionEl.appendChild(createGroupButton);
+
+    refreshGroupSelector();
+    refreshTargetModeUI();
+}
+
+// ============================================================
 // APPELS — Injection UI
 // ============================================================
 function injectCallUI() {
@@ -2113,6 +2642,16 @@ function injectCallUI() {
         callBtn.title = 'Appel'; callBtn.innerHTML = '📞'; callBtn.style.display = 'none';
         callBtn.addEventListener('click', initiateCall);
         userSelectionEl.appendChild(callBtn);
+
+        groupCallButton = document.createElement('button');
+        groupCallButton.id = 'group-call-btn';
+        groupCallButton.className = 'icon-button group-call-btn';
+        groupCallButton.type = 'button';
+        groupCallButton.title = 'Appel de groupe';
+        groupCallButton.innerHTML = '👥';
+        groupCallButton.style.display = 'none';
+        groupCallButton.addEventListener('click', startGroupCall);
+        userSelectionEl.appendChild(groupCallButton);
     }
 
     const overlay = document.createElement('div');
@@ -2184,6 +2723,8 @@ function injectCallUI() {
         const picker = document.getElementById('call-reaction-picker'), trigger = document.getElementById('call-reaction-open-btn');
         if (picker && !picker.contains(e.target) && e.target !== trigger) picker.classList.remove('visible');
     });
+    updateCallButtonState();
+    updateGroupCallButtonState();
 }
 
 function injectChatInputButtons() {
@@ -2424,7 +2965,11 @@ window.onload = async () => {
     injectChatInputButtons();
     injectVoiceUI();
     injectFileUploadUI();
+    injectGroupUI();
     injectCallUI();
+    groups = [];
+    refreshGroupSelector();
+    refreshTargetModeUI();
 
     await getUsers();
     const autoLogged = await checkAutoLogin();
@@ -2440,4 +2985,3 @@ window.addEventListener('beforeunload', () => {
     if (isRecording) cancelVoiceRecording();
 });
 // ... (tout le code existant de app.js)
-
