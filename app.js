@@ -2984,4 +2984,3 @@ window.addEventListener('beforeunload', () => {
         sendCallSignal(callPeerUserId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
     if (isRecording) cancelVoiceRecording();
 });
-// ... (tout le code existant de app.js)
