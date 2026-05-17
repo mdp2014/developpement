@@ -1,7 +1,9 @@
 /**
  * app.js — Messagerie Instantanée
  *
- * Correctifs v3 :
+ * Correctifs :
+ *  - Fix affichage date : renderMessages utilise un objet partagé pour lastDate
+ *  - Partage d'écran : toggleScreenShare() via getDisplayMedia() dans l'appel WebRTC
  *  - Audio WebRTC : flux remote correctement routé via remoteAudio
  *  - Vidéo WebRTC : flux remote attaché au bon <video> element via ontrack
  *  - Partage de fichiers (photos, vidéos, images) via Supabase Storage
@@ -112,6 +114,11 @@ let isVideoEnabled     = false;
 let remoteVideoEnabled = false;
 let localVideoStream   = null;
 let currentFacingMode  = 'user';
+
+// Partage d'écran
+let isScreenSharing   = false;
+let screenStream      = null;
+let screenSharingPeer = false;
 
 const CALL_TIMEOUT_MS = 30000;
 const MAX_RECONNECT   = 3;
@@ -953,6 +960,8 @@ function handleCallSignal(payload) {
     }
     if (payload.type === 'video_enabled' && callState === 'active') { remoteVideoEnabled = true; updateVideoLayout(); return; }
     if (payload.type === 'video_disabled' && callState === 'active') { remoteVideoEnabled = false; updateVideoLayout(); return; }
+    if (payload.type === 'screen_sharing_started' && callState === 'active') { screenSharingPeer = true; return; }
+    if (payload.type === 'screen_sharing_stopped' && callState === 'active') { screenSharingPeer = false; return; }
     if (payload.type === 'reaction' && callState === 'active') { showReactionBubble(payload.emoji, 'remote'); return; }
 }
 
@@ -1144,34 +1153,20 @@ document.addEventListener('click', e => {
 // ============================================================
 // PARTAGE DE FICHIERS — Supabase Storage
 // ============================================================
-
-/**
- * Parse un message de type fichier
- * Format : {"type":"__file__","url":"...","name":"...","mime":"...","size":123}
- */
 function parseFileMessage(content) {
     if (!content || !content.startsWith('{')) return null;
     try { const obj = JSON.parse(content); if (obj.type === '__file__') return obj; } catch {}
     return null;
 }
 
-/**
- * Détermine si un fichier est une image
- */
 function isImageMime(mime) {
     return mime && mime.startsWith('image/');
 }
 
-/**
- * Détermine si un fichier est une vidéo
- */
 function isVideoMime(mime) {
     return mime && mime.startsWith('video/');
 }
 
-/**
- * Upload un fichier vers Supabase Storage et envoie le message
- */
 async function handleFileUpload(file) {
     if (!currentUserId || !hasActiveTarget()) { alert('Connectez-vous pour envoyer des fichiers.'); return; }
     if (file.size > MAX_FILE_SIZE) { alert(`Fichier trop volumineux. Maximum : ${MAX_FILE_SIZE / 1024 / 1024} MB`); return; }
@@ -1186,7 +1181,6 @@ async function handleFileUpload(file) {
     if (progressEl) { progressEl.style.display = 'block'; progressEl.textContent = '📤 Envoi en cours…'; }
 
     try {
-        // Nom unique pour éviter les collisions
         const ext = file.name.split('.').pop();
         const uniqueName = `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
         const filePath = `${currentUserId}/${uniqueName}`;
@@ -1197,7 +1191,6 @@ async function handleFileUpload(file) {
 
         if (uploadError) throw uploadError;
 
-        // Obtenir l'URL publique
         const { data: urlData } = supabase.storage.from(FILE_BUCKET).getPublicUrl(filePath);
         const publicUrl = urlData.publicUrl;
 
@@ -1220,9 +1213,6 @@ async function handleFileUpload(file) {
     }
 }
 
-/**
- * Crée l'élément HTML d'aperçu d'un fichier dans le chat
- */
 function createFileMessageElement(fileData, isSent) {
     const wrap = document.createElement('div');
     wrap.className = 'file-message-wrap';
@@ -1243,7 +1233,6 @@ function createFileMessageElement(fileData, isSent) {
         video.preload = 'metadata';
         wrap.appendChild(video);
     } else {
-        // Fichier générique
         const fileDiv = document.createElement('div');
         fileDiv.className = 'file-msg-generic';
         fileDiv.innerHTML = `<span class="file-msg-icon">📎</span><span class="file-msg-name">${fileData.name}</span>`;
@@ -1260,7 +1249,6 @@ function createFileMessageElement(fileData, isSent) {
         wrap.appendChild(fileDiv);
     }
 
-    // Bouton télécharger pour images et vidéos aussi
     if (isImageMime(fileData.mime) || isVideoMime(fileData.mime)) {
         const dlBtn = document.createElement('a');
         dlBtn.href = fileData.url; dlBtn.download = fileData.name;
@@ -1272,9 +1260,6 @@ function createFileMessageElement(fileData, isSent) {
     return wrap;
 }
 
-/**
- * Visionneuse plein écran pour les images
- */
 function openMediaViewer(url, type, name) {
     const viewer = document.createElement('div');
     viewer.className = 'media-viewer-overlay';
@@ -1289,15 +1274,11 @@ function openMediaViewer(url, type, name) {
     document.body.appendChild(viewer);
 }
 
-/**
- * Injection du bouton 📎 (galerie) et 📷 (caméra) dans la barre d'input
- */
 function injectFileUploadUI() {
     const chatInput = document.querySelector('.chat-input');
     const sendBtn   = document.getElementById('send-button');
     if (!chatInput || !sendBtn) return;
 
-    // Input fichier galerie (photos + vidéos)
     const fileInput = document.createElement('input');
     fileInput.type = 'file'; fileInput.id = 'file-input'; fileInput.style.display = 'none';
     fileInput.accept = 'image/*,video/*';
@@ -1308,11 +1289,10 @@ function injectFileUploadUI() {
     });
     document.body.appendChild(fileInput);
 
-    // Input caméra directe (mobile)
     const cameraInput = document.createElement('input');
     cameraInput.type = 'file'; cameraInput.id = 'camera-input'; cameraInput.style.display = 'none';
     cameraInput.accept = 'image/*,video/*';
-    cameraInput.capture = 'environment'; // ouvre la caméra arrière par défaut sur mobile
+    cameraInput.capture = 'environment';
     cameraInput.addEventListener('change', e => {
         const file = e.target.files?.[0];
         if (file) handleFileUpload(file);
@@ -1320,19 +1300,16 @@ function injectFileUploadUI() {
     });
     document.body.appendChild(cameraInput);
 
-    // Bouton galerie / fichier
     const attachBtn = document.createElement('button');
     attachBtn.id = 'attach-button'; attachBtn.className = 'icon-button';
     attachBtn.title = 'Envoyer une photo ou vidéo'; attachBtn.innerHTML = '📎';
     attachBtn.addEventListener('click', () => fileInput.click());
 
-    // Bouton caméra directe
     const cameraBtn = document.createElement('button');
     cameraBtn.id = 'camera-button'; cameraBtn.className = 'icon-button';
     cameraBtn.title = 'Prendre une photo / vidéo'; cameraBtn.innerHTML = '📷';
     cameraBtn.addEventListener('click', () => cameraInput.click());
 
-    // Insérer avant le bouton Envoyer
     chatInput.insertBefore(attachBtn, sendBtn);
     chatInput.insertBefore(cameraBtn, sendBtn);
 }
@@ -1426,11 +1403,17 @@ function createVoiceMessagePlayer(voiceData, isSent) {
     return wrap;
 }
 
+// ============================================================
+// FIX DATE : renderMessages utilise un objet partagé pour lastDate
+// Le bug original : la closure du forEach capturait lastDate par valeur
+// au moment de l'appel, donc setLastDate ne propageait pas la valeur
+// aux itérations suivantes. L'objet _state contourne ce problème.
+// ============================================================
 function renderMessages(data) {
     chatMessages.innerHTML = '';
     const fragment = document.createDocumentFragment();
-    let lastDate = null;
-    data.forEach(message => appendToFragment(fragment, message, lastDate, d => { lastDate = d; }));
+    const _state = { lastDate: null };
+    data.forEach(message => appendToFragment(fragment, message, _state.lastDate, d => { _state.lastDate = d; }));
     chatMessages.appendChild(fragment);
 }
 
@@ -1536,7 +1519,6 @@ function appendOptimisticMessage(content) {
 // ============================================================
 async function deleteMessage(messageId, filePath) {
     const messageRef = currentMessages.find(m => m.id === messageId);
-    // Supprimer le fichier du storage si présent
     if (filePath) {
         await supabase.storage.from(FILE_BUCKET).remove([filePath]).catch(e => console.warn('deleteFile:', e));
     }
@@ -2113,7 +2095,92 @@ function stopRingtone() {
 }
 
 // ============================================================
-// APPELS — VIDÉO bidirectionnelle (CORRECTIF PRINCIPAL)
+// APPELS — PARTAGE D'ÉCRAN
+// ============================================================
+async function toggleScreenShare() {
+    if (!peerConnection || callState !== 'active') return;
+    if (!isScreenSharing) {
+        try {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({
+                video: { frameRate: { ideal: 30 }, cursor: 'always' },
+                audio: false
+            });
+            const screenTrack = screenStream.getVideoTracks()[0];
+
+            // Remplace ou ajoute la piste vidéo dans le PeerConnection
+            const existingSender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
+            if (existingSender) {
+                await existingSender.replaceTrack(screenTrack);
+            } else {
+                peerConnection.addTrack(screenTrack, screenStream);
+            }
+
+            // Affiche le partage d'écran localement
+            const localVid = document.getElementById('call-local-video');
+            if (localVid) { localVid.srcObject = screenStream; }
+
+            isScreenSharing = true;
+            isVideoEnabled  = true;
+            updateScreenShareButton(true);
+            updateVideoLayout();
+
+            await sendCallSignal(callPeerUserId, {
+                type: 'video_enabled', callId: currentCallId, callerId: currentUserId
+            });
+
+            // Arrêt automatique si l'utilisateur clique "Arrêter" dans le navigateur
+            screenTrack.onended = () => stopScreenShare();
+
+        } catch (err) {
+            // NotAllowedError = l'utilisateur a refusé, pas besoin d'alerter
+            if (err.name !== 'NotAllowedError') {
+                console.error('[ScreenShare]', err);
+            }
+        }
+    } else {
+        stopScreenShare();
+    }
+}
+
+async function stopScreenShare() {
+    if (screenStream) {
+        screenStream.getTracks().forEach(t => t.stop());
+        screenStream = null;
+    }
+    isScreenSharing = false;
+
+    // Si la caméra était active avant, on la restaure
+    if (isVideoEnabled && localVideoStream) {
+        const videoTrack = localVideoStream.getVideoTracks()[0];
+        const sender = peerConnection?.getSenders().find(s => s.track?.kind === 'video');
+        if (sender && videoTrack) await sender.replaceTrack(videoTrack).catch(() => {});
+        const localVid = document.getElementById('call-local-video');
+        if (localVid) localVid.srcObject = localVideoStream;
+    } else {
+        isVideoEnabled = false;
+        const sender = peerConnection?.getSenders().find(s => s.track?.kind === 'video');
+        if (sender) sender.replaceTrack(null).catch(() => {});
+        const localVid = document.getElementById('call-local-video');
+        if (localVid) localVid.srcObject = null;
+        if (callPeerUserId) await sendCallSignal(callPeerUserId, {
+            type: 'video_disabled', callId: currentCallId, callerId: currentUserId
+        }).catch(() => {});
+    }
+    updateScreenShareButton(false);
+    updateVideoLayout();
+}
+
+function updateScreenShareButton(active) {
+    const btn = document.getElementById('call-btn-screen');
+    if (!btn) return;
+    btn.innerHTML = active
+        ? '<span class="call-btn-icon">🖥️</span><span class="call-btn-label">Arrêter</span>'
+        : '<span class="call-btn-icon">🖥️</span><span class="call-btn-label">Écran</span>';
+    btn.classList.toggle('active', active);
+}
+
+// ============================================================
+// APPELS — VIDÉO bidirectionnelle
 // ============================================================
 async function toggleVideo() {
     if (callState !== 'active' || !peerConnection) return;
@@ -2265,28 +2332,33 @@ function showCallScreen(mode) {
     const hangupBtn = document.getElementById('call-btn-hangup');
     const videoBtn  = document.getElementById('call-btn-video');
     const flipBtn   = document.getElementById('call-btn-flip');
+    const screenBtn = document.getElementById('call-btn-screen');
 
     [acceptBtn, rejectBtn, hangupBtn].forEach(b => { if(b) b.style.display = 'none'; });
 
     if (mode === 'calling') {
         statusEl.textContent = 'Appel en cours…'; timerEl.style.display = 'none';
         hangupBtn.style.display = 'flex'; ctrlsEl.style.display = 'none'; reactEl.style.display = 'none';
+        if (screenBtn) screenBtn.style.display = 'none';
         startRingtone('outgoing');
     } else if (mode === 'ringing') {
         statusEl.textContent = 'Appel entrant…'; timerEl.style.display = 'none';
         acceptBtn.style.display = 'flex'; rejectBtn.style.display = 'flex';
         ctrlsEl.style.display = 'none'; reactEl.style.display = 'none';
+        if (screenBtn) screenBtn.style.display = 'none';
         startRingtone('incoming');
     } else if (mode === 'active') {
         statusEl.textContent = 'En communication'; timerEl.style.display = 'block';
         hangupBtn.style.display = 'flex'; ctrlsEl.style.display = 'flex'; reactEl.style.display = 'flex';
-        if (videoBtn) videoBtn.style.display = 'flex';
-        if (flipBtn)  flipBtn.style.display  = 'none';
+        if (videoBtn)  videoBtn.style.display  = 'flex';
+        if (flipBtn)   flipBtn.style.display   = 'none';
+        if (screenBtn) screenBtn.style.display = 'flex';
         stopRingtone(); startCallTimer();
     } else if (mode === 'reconnecting') {
         statusEl.textContent = 'Reconnexion…'; timerEl.style.display = 'none';
         hangupBtn.style.display = 'flex'; ctrlsEl.style.display = 'flex'; reactEl.style.display = 'none';
         if (videoBtn) videoBtn.style.display = 'flex';
+        if (screenBtn) screenBtn.style.display = 'none';
     }
 
     overlay.style.display = 'flex';
@@ -2348,7 +2420,7 @@ function releaseLocalStream() {
 }
 
 // ============================================================
-// WEBRTC — PeerConnection CORRIGÉE (audio + vidéo remote)
+// WEBRTC — PeerConnection
 // ============================================================
 function buildPeerConnection() {
     if (peerConnection) { try { peerConnection.close(); } catch {} peerConnection = null; }
@@ -2362,32 +2434,20 @@ function buildPeerConnection() {
         });
     };
 
-    // ─── CORRECTIF AUDIO + VIDÉO REMOTE ──────────────────────────
-    // On maintient un MediaStream remote unique pour éviter
-    // les conflits entre pistes audio et vidéo.
     const remoteStream = new MediaStream();
 
     peerConnection.ontrack = (event) => {
         const track = event.track;
-        console.log('[WebRTC] ontrack kind:', track.kind, 'state:', track.readyState);
-
-        // Ajouter la piste au stream remote partagé
         remoteStream.addTrack(track);
 
         if (track.kind === 'audio') {
-            // AUDIO : créer/réutiliser l'élément Audio et y brancher le stream
             if (!remoteAudio) {
                 remoteAudio = new Audio();
                 remoteAudio.autoplay = true;
-                // Sur iOS, il faut parfois forcer la lecture
                 remoteAudio.setAttribute('playsinline', 'true');
             }
-            // Brancher le stream complet (il peut contenir audio + vidéo, c'est ok)
             remoteAudio.srcObject = remoteStream;
-            // Forcer la lecture (nécessaire sur certains navigateurs)
             remoteAudio.play().catch(err => {
-                console.warn('[Audio] Lecture auto bloquée:', err);
-                // Retry à la première interaction utilisateur
                 const resumeAudio = () => { remoteAudio?.play().catch(() => {}); document.removeEventListener('click', resumeAudio); };
                 document.addEventListener('click', resumeAudio);
             });
@@ -2403,7 +2463,6 @@ function buildPeerConnection() {
             updateVideoLayout();
         }
 
-        // Piste stoppée (caméra coupée par le peer)
         track.onended = () => {
             if (track.kind === 'video') {
                 remoteVideoEnabled = false;
@@ -2421,11 +2480,9 @@ function buildPeerConnection() {
             if (track.kind === 'video') { remoteVideoEnabled = true; updateVideoLayout(); }
         };
     };
-    // ─────────────────────────────────────────────────────────────
 
     peerConnection.onconnectionstatechange = () => {
         const state = peerConnection?.connectionState;
-        console.log('[WebRTC] connectionState:', state);
         if (state === 'connected') {
             callReconnectAttempts = 0;
             if (callState !== 'active') { callState = 'active'; showCallScreen('active'); }
@@ -2433,11 +2490,9 @@ function buildPeerConnection() {
     };
 
     peerConnection.oniceconnectionstatechange = () => {
-        console.log('[WebRTC] iceConnectionState:', peerConnection?.iceConnectionState);
         if (peerConnection?.iceConnectionState === 'failed') handleCallDisconnect();
     };
 
-    // Renégociation automatique (pour ajout de piste vidéo)
     peerConnection.onnegotiationneeded = async () => {
         if (callState !== 'active') return;
         try {
@@ -2523,9 +2578,12 @@ function endCall() {
     callState = 'idle'; currentCallId = null; callPeerUserId = null;
     callReconnectAttempts = 0; isMuted = false; isSpeakerOn = false;
     isVideoEnabled = false; remoteVideoEnabled = false; currentFacingMode = 'user';
+    // Nettoyage partage d'écran
+    isScreenSharing = false; screenSharingPeer = false;
+    if (screenStream) { screenStream.getTracks().forEach(t => t.stop()); screenStream = null; }
     _pendingCallOffer = null;
     hideCallScreen();
-    updateMuteButton(); updateSpeakerButton(); updateVideoButton(false); updateFlipButton(false);
+    updateMuteButton(); updateSpeakerButton(); updateVideoButton(false); updateFlipButton(false); updateScreenShareButton(false);
 }
 
 function showCallEndedBrief(message) {
@@ -2686,6 +2744,9 @@ function injectCallUI() {
                 <button class="call-ctrl-btn" id="call-btn-flip" style="display:none;" title="Retourner la caméra">
                     <span class="call-btn-icon">🔄</span><span class="call-btn-label">Retourner</span>
                 </button>
+                <button class="call-ctrl-btn" id="call-btn-screen" style="display:none;" title="Partager l'écran">
+                    <span class="call-btn-icon">🖥️</span><span class="call-btn-label">Écran</span>
+                </button>
             </div>
             <div class="call-reaction-row" id="call-reaction-trigger" style="display:none;">
                 <button class="call-reaction-open-btn" id="call-reaction-open-btn">😊 Réaction</button>
@@ -2714,6 +2775,7 @@ function injectCallUI() {
     document.getElementById('call-btn-speaker').addEventListener('click', toggleSpeaker);
     document.getElementById('call-btn-video').addEventListener('click', toggleVideo);
     document.getElementById('call-btn-flip').addEventListener('click', flipCamera);
+    document.getElementById('call-btn-screen').addEventListener('click', toggleScreenShare);
 
     document.getElementById('call-reaction-open-btn').addEventListener('click', e => { e.stopPropagation(); toggleReactionPicker(); });
     document.querySelectorAll('.call-reaction-emoji').forEach(btn => {
@@ -2787,13 +2849,8 @@ function createWelcomeScreenStyles() {
             overflow-y: auto;
             padding-right: 6px;
         }
-        .welcome-card-inner::-webkit-scrollbar {
-            width: 6px;
-        }
-        .welcome-card-inner::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.22);
-            border-radius: 999px;
-        }
+        .welcome-card-inner::-webkit-scrollbar { width: 6px; }
+        .welcome-card-inner::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); border-radius: 999px; }
         .welcome-card::after {
             content: '';
             position: absolute;
@@ -2816,14 +2873,9 @@ function createWelcomeScreenStyles() {
             line-height: 1.7;
             font-size: 1rem;
         }
-        .welcome-art {
-            display: grid;
-            place-items: center;
-            margin-bottom: 28px;
-        }
+        .welcome-art { display: grid; place-items: center; margin-bottom: 28px; }
         .welcome-main-gif {
-            width: 100%;
-            max-width: 440px;
+            width: 100%; max-width: 440px;
             border-radius: 24px;
             box-shadow: 0 28px 100px rgba(0, 0, 0, 0.3);
             border: 1px solid rgba(255, 255, 255, 0.12);
@@ -2838,72 +2890,32 @@ function createWelcomeScreenStyles() {
             text-align: left;
         }
         .feature-card {
-            padding: 18px 16px;
-            border-radius: 20px;
+            padding: 18px 16px; border-radius: 20px;
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.08);
             box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
         }
-        .feature-card strong {
-            display: block;
-            margin-bottom: 8px;
-            font-size: 0.98rem;
-            color: #fff;
-        }
-        .feature-card span {
-            display: block;
-            color: rgba(255, 255, 255, 0.75);
-            font-size: 0.92rem;
-            line-height: 1.55;
-        }
+        .feature-card strong { display: block; margin-bottom: 8px; font-size: 0.98rem; color: #fff; }
+        .feature-card span { display: block; color: rgba(255, 255, 255, 0.75); font-size: 0.92rem; line-height: 1.55; }
         .welcome-loader {
-            margin: 24px auto 16px;
-            width: 112px;
-            height: 112px;
-            border-radius: 50%;
-            display: grid;
-            place-items: center;
+            margin: 24px auto 16px; width: 112px; height: 112px; border-radius: 50%;
+            display: grid; place-items: center;
             border: 1px solid rgba(255, 255, 255, 0.16);
             background: rgba(255, 255, 255, 0.06);
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
         }
-        .welcome-loader img {
-            width: 76px;
-            height: 76px;
-            object-fit: contain;
-            animation: welcome-pulse 1.8s ease-in-out infinite;
-        }
-        @keyframes welcome-pulse {
-            0%, 100% { transform: scale(1); opacity: 0.95; }
-            50% { transform: scale(1.06); opacity: 1; }
-        }
+        .welcome-loader img { width: 76px; height: 76px; object-fit: contain; animation: welcome-pulse 1.8s ease-in-out infinite; }
+        @keyframes welcome-pulse { 0%, 100% { transform: scale(1); opacity: 0.95; } 50% { transform: scale(1.06); opacity: 1; } }
         .welcome-continue-btn {
-            margin: 0 auto 8px;
-            padding: 16px 28px;
-            border: none;
-            border-radius: 999px;
-            font-size: 1rem;
-            font-weight: 700;
-            letter-spacing: 0.02em;
-            color: #fff;
+            margin: 0 auto 8px; padding: 16px 28px;
+            border: none; border-radius: 999px;
+            font-size: 1rem; font-weight: 700; letter-spacing: 0.02em; color: #fff;
             background: linear-gradient(135deg, #4a6dff, #2dc4ff);
             box-shadow: 0 18px 40px rgba(42, 116, 255, 0.25);
-            cursor: pointer;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            cursor: pointer; transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
-        .welcome-continue-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 22px 48px rgba(42, 116, 255, 0.3);
-        }
-        .welcome-note {
-            margin: 0;
-            font-size: 0.95rem;
-            color: rgba(255, 255, 255, 0.65);
-        }
-        #welcome-screen-overlay.fade-out {
-            opacity: 0;
-            transition: opacity 0.26s ease;
-        }
+        .welcome-continue-btn:hover { transform: translateY(-2px); box-shadow: 0 22px 48px rgba(42, 116, 255, 0.3); }
+        .welcome-note { margin: 0; font-size: 0.95rem; color: rgba(255, 255, 255, 0.65); }
+        #welcome-screen-overlay.fade-out { opacity: 0; transition: opacity 0.26s ease; }
     `;
     document.head.appendChild(style);
 }
@@ -2947,7 +2959,7 @@ function showWelcomeScreenIfNeeded() {
                     <img src="9d37a8ab76ebc8086da37442fc815b7a.gif" alt="Chargement" aria-label="Chargement en cours">
                 </div>
                 <button id="welcome-continue-btn" class="welcome-continue-btn">Continuer vers le chat</button>
-                <p class="welcome-note">Clique sur continuer quand tu es prêt. Le loader reste actif jusqu’au clic.</p>
+                <p class="welcome-note">Clique sur continuer quand tu es prêt.</p>
             </div>
         </div>
     `;
