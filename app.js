@@ -1441,22 +1441,22 @@ function appendMessageElement(message) {
     appendToFragment(fragment, message, lastDate, () => {});
     chatMessages.appendChild(fragment);
 }
-function appendToFragment(fragment, message, lastDate, setLastDate) {
-    const dateObj = new Date(message.created_at);
-    const msgDate = dateObj.toLocaleDateString('fr-FR');
-    const msgTime = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    const isMine = message.id_sent === currentUserId;
-    const sender = users[message.id_sent]?.username || 'Inconnu';
 
-    // --- Correction : On ne met à jour lastDate qu'après avoir vérifié ---
-    if (lastDate === null || msgDate !== lastDate) {
-        const el = document.createElement('div');
-        el.className = 'date';
-        el.textContent = msgDate;
-        fragment.appendChild(el);
-        setLastDate(msgDate); // Met à jour lastDate uniquement si on affiche la date
+function appendToFragment(fragment, message, lastDate, setLastDate) {
+    const dateObj  = new Date(message.created_at);
+    const msgDate  = dateObj.toLocaleDateString('fr-FR');
+    const msgTime  = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    const isMine   = message.id_sent === currentUserId;
+    const sender   = users[message.id_sent]?.username || 'Inconnu';
+    const voiceData = parseVoiceMessage(message.content);
+    const fileData  = parseFileMessage(message.content);
+    const groupCallData = parseGroupCallPayload(message.content);
+
+    if (msgDate !== lastDate) {
+        const el = document.createElement('div'); el.className = 'date'; el.textContent = msgDate;
+        fragment.appendChild(el); setLastDate(msgDate);
     }
-    // --- Fin de la correction ---
+
     const rowEl = document.createElement('div');
     rowEl.classList.add('message-row', isMine ? 'sent' : 'received');
 
