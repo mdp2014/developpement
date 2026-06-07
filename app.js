@@ -1654,6 +1654,7 @@ function showConnectedUI(username) {
 }
 
 async function completeLogin(user, plainPassword) {
+    closeWelcomeScreen();
     currentUserId = user.id; users[user.id] = { id: user.id, username: user.username };
     showConnectedUI(user.username);
     saveSession({ userId: user.id, username: user.username, plainPassword, issuedAt: Date.now(), expiresAt: Date.now() + SESSION_MS });
@@ -1713,6 +1714,8 @@ async function logout(options = {}) {
     chatMessages.innerHTML = ''; typingIndicator.style.display = 'none'; quickReplies.style.display = 'none';
     refreshGroupSelector();
     refreshTargetModeUI();
+    sessionStorage.removeItem(WELCOME_SESSION_KEY);
+    showWelcomeScreenIfNeeded();
     if (reason) alert(reason);
 }
 
@@ -2929,6 +2932,7 @@ function closeWelcomeScreen(overlay) {
 }
 
 function showWelcomeScreenIfNeeded() {
+    if (currentUserId) return;
     if (sessionStorage.getItem(WELCOME_SESSION_KEY)) return;
     createWelcomeScreenStyles();
     const overlay = document.createElement('div');
@@ -2973,7 +2977,6 @@ function showWelcomeScreenIfNeeded() {
 }
 
 window.onload = async () => {
-    showWelcomeScreenIfNeeded();
     injectChatInputButtons();
     injectVoiceUI();
     injectFileUploadUI();
@@ -2989,6 +2992,7 @@ window.onload = async () => {
         const restored = await restoreSession();
         if (!restored) { chatMessages.innerHTML = ''; }
     }
+    if (!currentUserId) showWelcomeScreenIfNeeded();
 };
 
 window.addEventListener('beforeunload', () => {
