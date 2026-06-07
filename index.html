@@ -6,6 +6,10 @@
     <title>Messagerie instantanée de Marin</title>
     <meta name="description" content="Messagerie instantanée de Marin pour discuter rapidement en ligne.">
     <meta name="robots" content="index, follow">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#6ee7b7">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="icon.svg">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -34,14 +38,16 @@
         <button id="logout-button">Déconnexion</button>
     </div>
 
+    <div class="app-layout" id="app-layout">
     <div class="chat-container">
         <div class="chat-header">
             <h1>💬 <span>Messagerie</span> Instantanée</h1>
+            <p id="chat-header-sub" class="chat-header-sub"></p>
         </div>
 
-        <div class="user-selection">
-            <label for="user-select">Vers</label>
-            <select id="user-select"></select>
+        <div class="user-selection user-selection--compact">
+            <label for="user-select" class="sr-only">Vers</label>
+            <select id="user-select" aria-hidden="true" tabindex="-1"></select>
             <!-- #call-audio-btn injecté ici par app.js -->
         </div>
 
@@ -66,6 +72,7 @@
         </div>
 
         <div id="upload-progress" class="upload-progress" style="display: none;"></div>
+    </div>
     </div>
 
     <!-- Emoji Picker Popup -->

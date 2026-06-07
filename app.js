@@ -12,6 +12,12 @@
 
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
+import {
+    initFeatures, onUserLoggedIn, onUserLoggedOut, onConversationChanged,
+    onMessagesLoaded, onMessageSent, onNewMessageReceived, enhanceMessageElement,
+    getReplyPayload, clearReplyAfterSend, compressImageIfNeeded, broadcastRecording,
+    persistIncomingCall, playNotifSoundIfHidden, notifyPeerPush, parsePollMessage
+} from './features.js';
 
 // ============================================================
 // CONFIG
@@ -79,6 +85,8 @@ const WELCOME_SESSION_KEY = 'welcome_screen_shown';
 const GROUP_CALL_BASE_URL = 'https://meet.jit.si';
 const GROUPS_TABLE = 'chat_groups';
 const GROUP_MEMBERS_TABLE = 'chat_group_members';
+// Clé VAPID publique pour Web Push (à configurer dans Supabase Edge Function send-push)
+const VAPID_PUBLIC_KEY = '';
 
 let _geoCache  = null;
 let _geoPend   = null;
@@ -397,6 +405,8 @@ async function restoreSession() {
     subscribeToPresence();
     subscribeToIncomingCalls();
     getGeolocationCached().catch(() => {});
+    onUserLoggedIn();
+    document.getElementById('app-layout')?.classList.add('logged-in');
     return true;
 }
 
@@ -476,7 +486,7 @@ async function loadGroupsFromDatabase() {
     if (!groupIds.length) return [];
 
     const [{ data: groupRows, error: groupRowsError }, { data: memberRows, error: memberRowsError }] = await Promise.all([
-        supabase.from(GROUPS_TABLE).select('id, name, created_by, created_at').in('id', groupIds),
+        supabase.from(GROUPS_TABLE).select('id, name, created_by, created_at, avatar_url, description, pinned_message_id').in('id', groupIds),
         supabase.from(GROUP_MEMBERS_TABLE).select('group_id, user_id').in('group_id', groupIds)
     ]);
 
@@ -500,7 +510,10 @@ async function loadGroupsFromDatabase() {
             name: String(row.name || 'Groupe').trim().slice(0, 60) || 'Groupe',
             members: normalizeGroupMembers(membersByGroup.get(String(row.id)) || []),
             createdBy: row.created_by ? String(row.created_by) : null,
-            createdAt: row.created_at || null
+            createdAt: row.created_at || null,
+            avatar_url: row.avatar_url || null,
+            description: row.description || null,
+            pinned_message_id: row.pinned_message_id || null
         }))
         .filter(g => g.members.includes(String(currentUserId)))
         .sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }));
@@ -532,7 +545,12 @@ function subscribeToPresence() {
         .on('presence', { event: 'leave' }, ({ key }) => { onlineUsers.delete(key); updatePresenceUI(); })
         .subscribe(async (status) => {
             if (status === 'SUBSCRIBED') {
-                await presenceChannel.track({ user_id: currentUserId, online_at: new Date().toISOString() });
+                await presenceChannel.track({
+                    user_id: currentUserId,
+                    online_at: new Date().toISOString(),
+                    status_type: users[currentUserId]?.status_type || 'available',
+                    status_text: users[currentUserId]?.status_text || ''
+                });
                 await fetchUnreadByUser();
                 updatePresenceUI();
             }
@@ -627,6 +645,16 @@ function refreshTargetModeUI() {
     if (createGroupButton) createGroupButton.style.display = currentUserId ? 'inline-flex' : 'none';
     updateCallButtonState();
     updateGroupCallButtonState();
+    const headerSub = document.getElementById('chat-header-sub');
+    if (headerSub) {
+        if (groupMode) {
+            const g = getActiveGroup();
+            headerSub.textContent = g?.description || (g?.avatar_url ? '' : '');
+        } else {
+            const peer = users[userSelect.value];
+            headerSub.textContent = peer?.status_text || '';
+        }
+    }
 }
 
 function updateGroupCallButtonState() {
@@ -655,7 +683,7 @@ function switchTargetMode(nextMode) {
     if (currentUserId) {
         subscribeToConversation();
         subscribeToTyping();
-        loadInitialMessages().then(() => updatePresenceUI());
+        loadInitialMessages().then(() => { updatePresenceUI(); onConversationChanged(); });
     }
 }
 
@@ -665,6 +693,9 @@ async function createGroupFlow() {
     if (!groupNameRaw) return;
     const groupName = groupNameRaw.trim().slice(0, 60);
     if (!groupName) { alert('Nom de groupe invalide.'); return; }
+
+    const descriptionRaw = prompt('Description du groupe (optionnel) :');
+    const avatarRaw = prompt('Emoji ou URL pour l\'avatar du groupe (optionnel) :');
 
     const selectable = Object.values(users).filter(u => String(u.id) !== String(currentUserId));
     if (!selectable.length) { alert('Aucun utilisateur disponible pour ce groupe.'); return; }
@@ -679,10 +710,16 @@ async function createGroupFlow() {
     if (!pickedIndexes.length) { alert('Aucun membre valide sélectionné.'); return; }
 
     const memberIds = normalizeGroupMembers([String(currentUserId), ...pickedIndexes.map(idx => String(selectable[idx - 1].id))]);
+    const groupPayload = {
+        name: groupName,
+        created_by: currentUserId,
+        description: descriptionRaw?.trim()?.slice(0, 200) || null,
+        avatar_url: avatarRaw?.trim()?.slice(0, 500) || null
+    };
     const { data: createdGroup, error: createGroupError } = await supabase
         .from(GROUPS_TABLE)
-        .insert({ name: groupName, created_by: currentUserId })
-        .select('id, name, created_by, created_at')
+        .insert(groupPayload)
+        .select('id, name, created_by, created_at, avatar_url, description')
         .single();
     if (createGroupError || !createdGroup) {
         if (isMissingGroupSchemaError(createGroupError)) showGroupSchemaErrorOnce(createGroupError);
@@ -733,7 +770,7 @@ async function loadInitialMessages() {
         if (!group) { chatMessages.innerHTML = ''; currentMessages = []; return; }
         const uid = String(currentUserId);
         const { data, error } = await supabase.from('messages')
-            .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, logical_id, message_type')
+            .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, logical_id, message_type, reply_to_id, reactions')
             .eq('group_id', group.id)
             .or(`id_received.eq.${uid},id_sent.eq.${uid}`)
             .order('created_at', { ascending: true });
@@ -747,7 +784,7 @@ async function loadInitialMessages() {
         const uid = currentUserId;
         const peer = userSelect.value;
         const { data, error } = await supabase.from('messages')
-            .select('id, id_sent, id_received, content, created_at, read_at, city, group_id')
+            .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, reply_to_id, reactions')
             .or(`and(id_sent.eq.${uid},id_received.eq.${peer}),and(id_sent.eq.${peer},id_received.eq.${uid})`)
             .is('group_id', null)
             .order('created_at', { ascending: true });
@@ -761,6 +798,7 @@ async function loadInitialMessages() {
     await fetchUnreadByUser();
     updatePresenceUI();
     if (currentMessages.length > 0) generateQuickReplies(currentMessages[currentMessages.length - 1]);
+    onMessagesLoaded();
 }
 
 // ============================================================
@@ -1005,6 +1043,7 @@ function showNotification(title, body) {
         const n = new Notification(title, { body, tag: 'msg', requireInteraction: false, silent: false });
         n.onclick = () => { window.focus(); n.close(); };
         setTimeout(() => n.close(), 5000);
+        playNotifSoundIfHidden();
     }
 }
 
@@ -1012,15 +1051,26 @@ function showNotification(title, body) {
 // UTILISATEURS
 // ============================================================
 async function getUsers() {
-    const { data, error } = await supabase.from('users').select('id, username');
-    if (error) { console.error('getUsers:', error); return; }
-    userSelect.innerHTML = '';
-    data.forEach(user => {
-        users[user.id] = user;
-        const opt = document.createElement('option');
-        opt.value = user.id; opt.textContent = user.username;
-        userSelect.appendChild(opt);
-    });
+    const { data, error } = await supabase.from('users').select('id, username, status_type, status_text, avatar_url');
+    if (error) {
+        const fallback = await supabase.from('users').select('id, username');
+        if (fallback.error) { console.error('getUsers:', fallback.error); return; }
+        userSelect.innerHTML = '';
+        fallback.data.forEach(user => {
+            users[user.id] = user;
+            const opt = document.createElement('option');
+            opt.value = user.id; opt.textContent = user.username;
+            userSelect.appendChild(opt);
+        });
+    } else {
+        userSelect.innerHTML = '';
+        data.forEach(user => {
+            users[user.id] = user;
+            const opt = document.createElement('option');
+            opt.value = user.id; opt.textContent = user.username;
+            userSelect.appendChild(opt);
+        });
+    }
     const firstPeer = Array.from(userSelect.options).find(opt => String(opt.value) !== String(currentUserId));
     if (firstPeer) userSelect.value = firstPeer.value;
     refreshGroupSelector();
@@ -1181,6 +1231,7 @@ async function handleFileUpload(file) {
     if (progressEl) { progressEl.style.display = 'block'; progressEl.textContent = '📤 Envoi en cours…'; }
 
     try {
+        file = await compressImageIfNeeded(file);
         const ext = file.name.split('.').pop();
         const uniqueName = `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
         const filePath = `${currentUserId}/${uniqueName}`;
@@ -1434,6 +1485,7 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     const voiceData = parseVoiceMessage(message.content);
     const fileData  = parseFileMessage(message.content);
     const groupCallData = parseGroupCallPayload(message.content);
+    const pollData = parsePollMessage(message.content);
 
     if (msgDate !== lastDate) {
         const el = document.createElement('div'); el.className = 'date'; el.textContent = msgDate;
@@ -1456,6 +1508,7 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     if (voiceData) msgEl.classList.add('voice-msg');
     if (fileData)  msgEl.classList.add('file-msg');
     if (groupCallData) msgEl.classList.add('group-call-msg');
+    if (pollData) msgEl.classList.add('poll-msg');
     msgEl.dataset.msgId = message.id;
 
     const metaSpan = document.createElement('span'); metaSpan.className = 'msg-meta';
@@ -1469,6 +1522,7 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     if (voiceData)         { msgEl.appendChild(createVoiceMessagePlayer(voiceData, isMine)); }
     else if (fileData)     { msgEl.appendChild(createFileMessageElement(fileData, isMine)); }
     else if (groupCallData){ msgEl.appendChild(createGroupCallMessageElement(groupCallData)); }
+    else if (pollData)     { msgEl.appendChild(document.createElement('span')); }
     else                   { msgEl.appendChild(document.createTextNode(message.content)); }
     msgEl.appendChild(metaSpan);
 
@@ -1479,6 +1533,7 @@ function appendToFragment(fragment, message, lastDate, setLastDate) {
     }
 
     rowEl.appendChild(msgEl);
+    enhanceMessageElement(msgEl, rowEl, message, isMine);
     fragment.appendChild(rowEl);
 }
 
@@ -1550,6 +1605,7 @@ async function sendMessage(userId, content) {
     if (!isVoice) optimisticEl = appendOptimisticMessage(content);
     isTyping = false; clearTimeout(typingTimeout); broadcastTyping(false);
     const createdAt = new Date().toISOString();
+    const replyPayload = getReplyPayload();
 
     if (!isGroupMode()) {
         const { data, error } = await supabase.from('messages')
@@ -1564,16 +1620,21 @@ async function sendMessage(userId, content) {
                 city: null,
                 group_id: null,
                 logical_id: null,
-                message_type: 'direct'
+                message_type: 'direct',
+                reply_to_id: replyPayload.reply_to_id || null,
+                reactions: {}
             })
-            .select('id, id_sent, id_received, content, created_at, read_at, city').single();
+            .select('id, id_sent, id_received, content, created_at, read_at, city, reply_to_id, reactions').single();
         if (error) { console.error('sendMessage:', error); optimisticEl?.remove(); return false; }
+        clearReplyAfterSend();
         if (optimisticEl) {
             optimisticEl.remove();
             if (!currentMessages.find(m => m.id === data.id)) {
                 currentMessages.push(data); appendMessageElement(data); chatMessages.scrollTop = chatMessages.scrollHeight;
             }
         }
+        onMessageSent(data);
+        notifyPeerPush(userSelect.value, `Message de ${users[userId]?.username || '?'}`, content.substring(0, 80)).catch(() => {});
         if (data.id && !isFile && !isGroupCall) {
             getGeolocationCached().then(async geo => {
                 const city = await getCityFromCoordinates(geo.latitude, geo.longitude);
@@ -1603,12 +1664,15 @@ async function sendMessage(userId, content) {
         city: null,
         group_id: group.id,
         logical_id: logicalId,
-        message_type: isGroupCall ? 'group_call' : 'group'
+        message_type: isGroupCall ? 'group_call' : 'group',
+        reply_to_id: replyPayload.reply_to_id || null,
+        reactions: {}
     }));
     const { data, error } = await supabase.from('messages')
         .insert(rows)
-        .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, logical_id, message_type');
+        .select('id, id_sent, id_received, content, created_at, read_at, city, group_id, logical_id, message_type, reply_to_id, reactions');
     if (error) { console.error('sendMessage(group):', error); optimisticEl?.remove(); return false; }
+    clearReplyAfterSend();
 
     const inserted = (data && data.length > 0 ? data[0] : null);
     const logicalMessage = {
@@ -1621,7 +1685,9 @@ async function sendMessage(userId, content) {
         city: inserted?.city || null,
         logical_id: logicalId,
         group_id: group.id,
-        message_type: isGroupCall ? 'group_call' : 'group'
+        message_type: isGroupCall ? 'group_call' : 'group',
+        reply_to_id: inserted?.reply_to_id || replyPayload.reply_to_id || null,
+        reactions: inserted?.reactions || {}
     };
 
     if (optimisticEl) optimisticEl.remove();
@@ -1630,6 +1696,7 @@ async function sendMessage(userId, content) {
         appendMessageElement(logicalMessage);
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
+    onMessageSent(logicalMessage);
     return true;
 }
 
@@ -1665,6 +1732,8 @@ async function completeLogin(user, plainPassword) {
     await loadInitialMessages();
     subscribeToConversation(); subscribeToTyping(); subscribeToPresence(); subscribeToIncomingCalls();
     getGeolocationCached().catch(() => {});
+    onUserLoggedIn();
+    document.getElementById('app-layout')?.classList.add('logged-in');
 }
 
 async function login() {
@@ -1715,6 +1784,8 @@ async function logout(options = {}) {
     refreshGroupSelector();
     refreshTargetModeUI();
     sessionStorage.removeItem(WELCOME_SESSION_KEY);
+    onUserLoggedOut();
+    document.getElementById('app-layout')?.classList.remove('logged-in');
     showWelcomeScreenIfNeeded();
     if (reason) alert(reason);
 }
@@ -1727,7 +1798,10 @@ userSelect.addEventListener('change', async () => {
     if (isGroupMode()) return;
     currentMessages = []; typingIndicator.style.display = 'none'; quickReplies.style.display = 'none';
     isTyping = false; clearTimeout(typingTimeout);
-    if (currentUserId) { subscribeToConversation(); subscribeToTyping(); await loadInitialMessages(); updatePresenceUI(); }
+    if (currentUserId) {
+        subscribeToConversation(); subscribeToTyping(); await loadInitialMessages(); updatePresenceUI();
+        updateCallButtonState(); onConversationChanged();
+    }
 });
 
 // ============================================================
@@ -1807,6 +1881,7 @@ async function startVoiceRecording() {
     micBtn.classList.add('recording'); micBtn.innerHTML = '⏹';
     document.getElementById('voice-slide-hint').classList.add('visible');
     startVoiceTimer();
+    broadcastRecording(true);
 }
 
 function lockVoiceRecording() {
@@ -1864,6 +1939,7 @@ function cleanupVoiceRecording() {
     const pauseBtn = document.getElementById('vlb-pause-btn');
     if (pauseBtn) { pauseBtn.textContent = '⏸ Pause'; pauseBtn.classList.remove('paused'); }
     hideVoiceSlideIndicator();
+    broadcastRecording(false);
 }
 
 function startVoiceTimer() {
@@ -2395,7 +2471,10 @@ function updateCallButtonState() {
     if (isGroupMode()) { btn.style.display = 'none'; return; }
     const selId = userSelect.value;
     const peerIsOnline = onlineUsers.has(selId);
-    btn.style.display = (currentUserId && selId && selId !== String(currentUserId) && peerIsOnline) ? 'flex' : 'none';
+    const canCall = !!(currentUserId && selId && selId !== String(currentUserId));
+    btn.style.display = canCall ? 'flex' : 'none';
+    btn.classList.toggle('offline-peer', canCall && !peerIsOnline);
+    btn.title = peerIsOnline ? 'Appel audio/vidéo' : 'Appel (contact hors ligne — notification envoyée)';
 }
 
 function startCallTimer() {
@@ -2530,6 +2609,7 @@ async function initiateCall() {
         type: 'incoming', callId: currentCallId, callerId: currentUserId,
         offer: { type: offer.type, sdp: offer.sdp }
     });
+    persistIncomingCall(calleeId, currentUserId, currentCallId, { type: offer.type, sdp: offer.sdp });
     setTimeout(async () => {
         if (callState === 'calling') {
             await sendCallSignal(calleeId, { type: 'ended', callId: currentCallId, callerId: currentUserId });
@@ -2673,6 +2753,7 @@ function injectGroupUI() {
             subscribeToConversation();
             await loadInitialMessages();
             updateGroupCallButtonState();
+            onConversationChanged();
         }
     });
 
@@ -2977,6 +3058,30 @@ function showWelcomeScreenIfNeeded() {
 }
 
 window.onload = async () => {
+    initFeatures({
+        supabase, users, userSelect, messageInput, chatMessages, targetModeSelect, groupSelect, activeGroupId,
+        typingIndicator, VAPID_PUBLIC_KEY,
+        getCurrentUserId: () => currentUserId,
+        getCurrentMessages: () => currentMessages,
+        getGroups: () => groups,
+        getActiveGroup, isGroupMode, hasActiveTarget, switchTargetMode,
+        setActiveGroupId: (id) => { activeGroupId = id; },
+        createGroupFlow,
+        sendMessage, loadInitialMessages, subscribeToConversation, subscribeToTyping,
+        refreshTargetModeUI, updatePresenceUI, updateCallButtonState, showNotification,
+        getCallState: () => callState,
+        handleCallSignal,
+        broadcastMyStatus: async () => {
+            if (presenceChannel && currentUserId) {
+                await presenceChannel.track({
+                    user_id: currentUserId,
+                    online_at: new Date().toISOString(),
+                    status_type: users[currentUserId]?.status_type || 'available',
+                    status_text: users[currentUserId]?.status_text || ''
+                }).catch(() => {});
+            }
+        }
+    });
     injectChatInputButtons();
     injectVoiceUI();
     injectFileUploadUI();

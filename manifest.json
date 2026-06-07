@@ -1,0 +1,19 @@
+{
+  "name": "Messagerie de Marin",
+  "short_name": "Messagerie",
+  "description": "Messagerie instantanée avec appels, vocaux et groupes",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "background_color": "#0a0e1a",
+  "theme_color": "#6ee7b7",
+  "orientation": "portrait-primary",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
